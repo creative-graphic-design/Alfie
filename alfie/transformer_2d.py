@@ -22,7 +22,11 @@ from diffusers.configuration_utils import ConfigMixin, register_to_config
 from diffusers.utils import BaseOutput, deprecate, is_torch_version, logging
 
 from diffusers.models.attention import BasicTransformerBlock
-from diffusers.models.embeddings import ImagePositionalEmbeddings, PatchEmbed, PixArtAlphaTextProjection
+from diffusers.models.embeddings import (
+    ImagePositionalEmbeddings,
+    PatchEmbed,
+    PixArtAlphaTextProjection,
+)
 from diffusers.models.modeling_utils import ModelMixin
 from diffusers.models.normalization import AdaLayerNormSingle
 
@@ -113,7 +117,10 @@ class Transformer2DModel(ModelMixin, ConfigMixin):
                 raise NotImplementedError(
                     f"Forward pass is not implemented when `patch_size` is not None and `norm_type` is '{norm_type}'."
                 )
-            elif norm_type in ["ada_norm", "ada_norm_zero"] and num_embeds_ada_norm is None:
+            elif (
+                norm_type in ["ada_norm", "ada_norm_zero"]
+                and num_embeds_ada_norm is None
+            ):
                 raise ValueError(
                     f"When using a `patch_size` and this `norm_type` ({norm_type}), `num_embeds_ada_norm` cannot be None."
                 )
@@ -124,7 +131,9 @@ class Transformer2DModel(ModelMixin, ConfigMixin):
         self.caption_channels = caption_channels
         self.num_attention_heads = num_attention_heads
         self.attention_head_dim = attention_head_dim
-        self.inner_dim = self.config.num_attention_heads * self.config.attention_head_dim
+        self.inner_dim = (
+            self.config.num_attention_heads * self.config.attention_head_dim
+        )
         self.in_channels = in_channels
         self.out_channels = in_channels if out_channels is None else out_channels
         self.gradient_checkpointing = False
@@ -149,7 +158,12 @@ class Transformer2DModel(ModelMixin, ConfigMixin):
                 " results in future versions. If you have downloaded this checkpoint from the Hugging Face Hub, it"
                 " would be very nice if you could open a Pull request for the `transformer/config.json` file"
             )
-            deprecate("norm_type!=num_embeds_ada_norm", "1.0.0", deprecation_message, standard_warn=False)
+            deprecate(
+                "norm_type!=num_embeds_ada_norm",
+                "1.0.0",
+                deprecation_message,
+                standard_warn=False,
+            )
             norm_type = "ada_norm"
 
         if self.is_input_continuous and self.is_input_vectorized:
@@ -162,7 +176,11 @@ class Transformer2DModel(ModelMixin, ConfigMixin):
                 f"Cannot define both `num_vector_embeds`: {num_vector_embeds} and `patch_size`: {patch_size}. Make"
                 " sure that either `num_vector_embeds` or `num_patches` is None."
             )
-        elif not self.is_input_continuous and not self.is_input_vectorized and not self.is_input_patches:
+        elif (
+            not self.is_input_continuous
+            and not self.is_input_vectorized
+            and not self.is_input_patches
+        ):
             raise ValueError(
                 f"Has to define `in_channels`: {in_channels}, `num_vector_embeds`: {num_vector_embeds}, or patch_size:"
                 f" {patch_size}. Make sure that `in_channels`, `num_vector_embeds` or `num_patches` is not None."
@@ -181,12 +199,17 @@ class Transformer2DModel(ModelMixin, ConfigMixin):
 
     def _init_continuous_input(self, norm_type):
         self.norm = torch.nn.GroupNorm(
-            num_groups=self.config.norm_num_groups, num_channels=self.in_channels, eps=1e-6, affine=True
+            num_groups=self.config.norm_num_groups,
+            num_channels=self.in_channels,
+            eps=1e-6,
+            affine=True,
         )
         if self.use_linear_projection:
             self.proj_in = torch.nn.Linear(self.in_channels, self.inner_dim)
         else:
-            self.proj_in = torch.nn.Conv2d(self.in_channels, self.inner_dim, kernel_size=1, stride=1, padding=0)
+            self.proj_in = torch.nn.Conv2d(
+                self.in_channels, self.inner_dim, kernel_size=1, stride=1, padding=0
+            )
 
         self.transformer_blocks = nn.ModuleList(
             [
@@ -214,10 +237,14 @@ class Transformer2DModel(ModelMixin, ConfigMixin):
         if self.use_linear_projection:
             self.proj_out = torch.nn.Linear(self.inner_dim, self.out_channels)
         else:
-            self.proj_out = torch.nn.Conv2d(self.inner_dim, self.out_channels, kernel_size=1, stride=1, padding=0)
+            self.proj_out = torch.nn.Conv2d(
+                self.inner_dim, self.out_channels, kernel_size=1, stride=1, padding=0
+            )
 
     def _init_vectorized_inputs(self, norm_type):
-        assert self.config.sample_size is not None, "Transformer2DModel over discrete input must provide sample_size"
+        assert (
+            self.config.sample_size is not None
+        ), "Transformer2DModel over discrete input must provide sample_size"
         assert (
             self.config.num_vector_embeds is not None
         ), "Transformer2DModel over discrete input must provide num_embed"
@@ -227,7 +254,10 @@ class Transformer2DModel(ModelMixin, ConfigMixin):
         self.num_latent_pixels = self.height * self.width
 
         self.latent_image_embedding = ImagePositionalEmbeddings(
-            num_embed=self.config.num_vector_embeds, embed_dim=self.inner_dim, height=self.height, width=self.width
+            num_embed=self.config.num_vector_embeds,
+            embed_dim=self.inner_dim,
+            height=self.height,
+            width=self.width,
         )
 
         self.transformer_blocks = nn.ModuleList(
@@ -257,7 +287,9 @@ class Transformer2DModel(ModelMixin, ConfigMixin):
         self.out = nn.Linear(self.inner_dim, self.config.num_vector_embeds - 1)
 
     def _init_patched_inputs(self, norm_type):
-        assert self.config.sample_size is not None, "Transformer2DModel over patched input must provide sample_size"
+        assert (
+            self.config.sample_size is not None
+        ), "Transformer2DModel over patched input must provide sample_size"
 
         self.height = self.config.sample_size
         self.width = self.config.sample_size
@@ -301,16 +333,24 @@ class Transformer2DModel(ModelMixin, ConfigMixin):
         )
 
         if self.config.norm_type != "ada_norm_single":
-            self.norm_out = nn.LayerNorm(self.inner_dim, elementwise_affine=False, eps=1e-6)
+            self.norm_out = nn.LayerNorm(
+                self.inner_dim, elementwise_affine=False, eps=1e-6
+            )
             self.proj_out_1 = nn.Linear(self.inner_dim, 2 * self.inner_dim)
             self.proj_out_2 = nn.Linear(
-                self.inner_dim, self.config.patch_size * self.config.patch_size * self.out_channels
+                self.inner_dim,
+                self.config.patch_size * self.config.patch_size * self.out_channels,
             )
         elif self.config.norm_type == "ada_norm_single":
-            self.norm_out = nn.LayerNorm(self.inner_dim, elementwise_affine=False, eps=1e-6)
-            self.scale_shift_table = nn.Parameter(torch.randn(2, self.inner_dim) / self.inner_dim**0.5)
+            self.norm_out = nn.LayerNorm(
+                self.inner_dim, elementwise_affine=False, eps=1e-6
+            )
+            self.scale_shift_table = nn.Parameter(
+                torch.randn(2, self.inner_dim) / self.inner_dim**0.5
+            )
             self.proj_out = nn.Linear(
-                self.inner_dim, self.config.patch_size * self.config.patch_size * self.out_channels
+                self.inner_dim,
+                self.config.patch_size * self.config.patch_size * self.out_channels,
             )
 
         # PixArt-Alpha blocks.
@@ -343,10 +383,15 @@ class Transformer2DModel(ModelMixin, ConfigMixin):
         # set recursively
         processors = {}
 
-        def fn_recursive_add_processors(name: str, module: torch.nn.Module,
-                                        processors: Dict[str, AttentionProcessor]):
+        def fn_recursive_add_processors(
+            name: str,
+            module: torch.nn.Module,
+            processors: Dict[str, AttentionProcessor],
+        ):
             if hasattr(module, "get_processor"):
-                processors[f"{name}.processor"] = module.get_processor(return_deprecated_lora=True)
+                processors[f"{name}.processor"] = module.get_processor(
+                    return_deprecated_lora=True
+                )
 
             for sub_name, child in module.named_children():
                 fn_recursive_add_processors(f"{name}.{sub_name}", child, processors)
@@ -359,7 +404,9 @@ class Transformer2DModel(ModelMixin, ConfigMixin):
         return processors
 
     # from https://github.com/huggingface/diffusers/blob/main/src/diffusers/models/unets/unet_2d_condition.py#L716
-    def set_attn_processor(self, processor: Union[AttentionProcessor, Dict[str, AttentionProcessor]]):
+    def set_attn_processor(
+        self, processor: Union[AttentionProcessor, Dict[str, AttentionProcessor]]
+    ):
         r"""
         Sets the attention processor to use to compute attention.
 
@@ -445,7 +492,9 @@ class Transformer2DModel(ModelMixin, ConfigMixin):
         """
         if cross_attention_kwargs is not None:
             if cross_attention_kwargs.get("scale", None) is not None:
-                logger.warning("Passing `scale` to `cross_attention_kwargs` is deprecated. `scale` will be ignored.")
+                logger.warning(
+                    "Passing `scale` to `cross_attention_kwargs` is deprecated. `scale` will be ignored."
+                )
         # ensure attention_mask is a bias, and give it a singleton query_tokens dimension.
         #   we may have done this conversion already, e.g. if we came here via UNet2DConditionModel#forward.
         #   we can tell by counting dims; if ndim == 2: it's a mask rather than a bias.
@@ -466,7 +515,9 @@ class Transformer2DModel(ModelMixin, ConfigMixin):
 
         # convert encoder_attention_mask to a bias the same way we do for attention_mask
         if encoder_attention_mask is not None and encoder_attention_mask.ndim == 2:
-            encoder_attention_mask = (1 - encoder_attention_mask.to(hidden_states.dtype)) * -10000.0
+            encoder_attention_mask = (
+                1 - encoder_attention_mask.to(hidden_states.dtype)
+            ) * -10000.0
             encoder_attention_mask = encoder_attention_mask.unsqueeze(1)
 
         # 1. Input
@@ -477,9 +528,14 @@ class Transformer2DModel(ModelMixin, ConfigMixin):
         elif self.is_input_vectorized:
             hidden_states = self.latent_image_embedding(hidden_states)
         elif self.is_input_patches:
-            height, width = hidden_states.shape[-2] // self.patch_size, hidden_states.shape[-1] // self.patch_size
-            hidden_states, encoder_hidden_states, timestep, embedded_timestep = self._operate_on_patched_inputs(
-                hidden_states, encoder_hidden_states, timestep, added_cond_kwargs
+            height, width = (
+                hidden_states.shape[-2] // self.patch_size,
+                hidden_states.shape[-1] // self.patch_size,
+            )
+            hidden_states, encoder_hidden_states, timestep, embedded_timestep = (
+                self._operate_on_patched_inputs(
+                    hidden_states, encoder_hidden_states, timestep, added_cond_kwargs
+                )
             )
 
         # 2. Blocks
@@ -495,7 +551,9 @@ class Transformer2DModel(ModelMixin, ConfigMixin):
 
                     return custom_forward
 
-                ckpt_kwargs: Dict[str, Any] = {"use_reentrant": False} if is_torch_version(">=", "1.11.0") else {}
+                ckpt_kwargs: Dict[str, Any] = (
+                    {"use_reentrant": False} if is_torch_version(">=", "1.11.0") else {}
+                )
                 hidden_states = torch.utils.checkpoint.checkpoint(
                     create_custom_forward(block),
                     hidden_states,
@@ -552,15 +610,21 @@ class Transformer2DModel(ModelMixin, ConfigMixin):
         if not self.use_linear_projection:
             hidden_states = self.proj_in(hidden_states)
             inner_dim = hidden_states.shape[1]
-            hidden_states = hidden_states.permute(0, 2, 3, 1).reshape(batch, height * width, inner_dim)
+            hidden_states = hidden_states.permute(0, 2, 3, 1).reshape(
+                batch, height * width, inner_dim
+            )
         else:
             inner_dim = hidden_states.shape[1]
-            hidden_states = hidden_states.permute(0, 2, 3, 1).reshape(batch, height * width, inner_dim)
+            hidden_states = hidden_states.permute(0, 2, 3, 1).reshape(
+                batch, height * width, inner_dim
+            )
             hidden_states = self.proj_in(hidden_states)
 
         return hidden_states, inner_dim
 
-    def _operate_on_patched_inputs(self, hidden_states, encoder_hidden_states, timestep, added_cond_kwargs):
+    def _operate_on_patched_inputs(
+        self, hidden_states, encoder_hidden_states, timestep, added_cond_kwargs
+    ):
         batch_size = hidden_states.shape[0]
         hidden_states = self.pos_embed(hidden_states)
         embedded_timestep = None
@@ -571,25 +635,36 @@ class Transformer2DModel(ModelMixin, ConfigMixin):
                     "`added_cond_kwargs` cannot be None when using additional conditions for `adaln_single`."
                 )
             timestep, embedded_timestep = self.adaln_single(
-                timestep, added_cond_kwargs, batch_size=batch_size, hidden_dtype=hidden_states.dtype
+                timestep,
+                added_cond_kwargs,
+                batch_size=batch_size,
+                hidden_dtype=hidden_states.dtype,
             )
 
         if self.caption_projection is not None:
             encoder_hidden_states = self.caption_projection(encoder_hidden_states)
-            encoder_hidden_states = encoder_hidden_states.view(batch_size, -1, hidden_states.shape[-1])
+            encoder_hidden_states = encoder_hidden_states.view(
+                batch_size, -1, hidden_states.shape[-1]
+            )
 
         return hidden_states, encoder_hidden_states, timestep, embedded_timestep
 
-    def _get_output_for_continuous_inputs(self, hidden_states, residual, batch_size, height, width, inner_dim):
+    def _get_output_for_continuous_inputs(
+        self, hidden_states, residual, batch_size, height, width, inner_dim
+    ):
         if not self.use_linear_projection:
             hidden_states = (
-                hidden_states.reshape(batch_size, height, width, inner_dim).permute(0, 3, 1, 2).contiguous()
+                hidden_states.reshape(batch_size, height, width, inner_dim)
+                .permute(0, 3, 1, 2)
+                .contiguous()
             )
             hidden_states = self.proj_out(hidden_states)
         else:
             hidden_states = self.proj_out(hidden_states)
             hidden_states = (
-                hidden_states.reshape(batch_size, height, width, inner_dim).permute(0, 3, 1, 2).contiguous()
+                hidden_states.reshape(batch_size, height, width, inner_dim)
+                .permute(0, 3, 1, 2)
+                .contiguous()
             )
 
         output = hidden_states + residual
@@ -605,17 +680,27 @@ class Transformer2DModel(ModelMixin, ConfigMixin):
         return output
 
     def _get_output_for_patched_inputs(
-        self, hidden_states, timestep, class_labels, embedded_timestep, height=None, width=None
+        self,
+        hidden_states,
+        timestep,
+        class_labels,
+        embedded_timestep,
+        height=None,
+        width=None,
     ):
         if self.config.norm_type != "ada_norm_single":
             conditioning = self.transformer_blocks[0].norm1.emb(
                 timestep, class_labels, hidden_dtype=hidden_states.dtype
             )
             shift, scale = self.proj_out_1(F.silu(conditioning)).chunk(2, dim=1)
-            hidden_states = self.norm_out(hidden_states) * (1 + scale[:, None]) + shift[:, None]
+            hidden_states = (
+                self.norm_out(hidden_states) * (1 + scale[:, None]) + shift[:, None]
+            )
             hidden_states = self.proj_out_2(hidden_states)
         elif self.config.norm_type == "ada_norm_single":
-            shift, scale = (self.scale_shift_table[None] + embedded_timestep[:, None]).chunk(2, dim=1)
+            shift, scale = (
+                self.scale_shift_table[None] + embedded_timestep[:, None]
+            ).chunk(2, dim=1)
             hidden_states = self.norm_out(hidden_states)
             # Modulation
             hidden_states = hidden_states * (1 + scale) + shift
@@ -626,10 +711,22 @@ class Transformer2DModel(ModelMixin, ConfigMixin):
         if self.adaln_single is None:
             height = width = int(hidden_states.shape[1] ** 0.5)
         hidden_states = hidden_states.reshape(
-            shape=(-1, height, width, self.patch_size, self.patch_size, self.out_channels)
+            shape=(
+                -1,
+                height,
+                width,
+                self.patch_size,
+                self.patch_size,
+                self.out_channels,
+            )
         )
         hidden_states = torch.einsum("nhwpqc->nchpwq", hidden_states)
         output = hidden_states.reshape(
-            shape=(-1, self.out_channels, height * self.patch_size, width * self.patch_size)
+            shape=(
+                -1,
+                self.out_channels,
+                height * self.patch_size,
+                width * self.patch_size,
+            )
         )
         return output

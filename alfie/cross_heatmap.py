@@ -1,26 +1,32 @@
 from collections import defaultdict
 from dataclasses import dataclass
 from functools import lru_cache
-from pathlib import Path
-from typing import List, Any, Dict, Tuple, Set, Iterable
+from typing import Any, Dict, Tuple, Set, Iterable
 
 from matplotlib import pyplot as plt
 import numpy as np
-import PIL.Image
 import spacy.tokens
 import torch
 import torch.nn.functional as F
 
 from .utils import compute_token_merge_indices, cached_nlp, auto_autocast
 
-__all__ = ['CrossGlobalHeatMap', 'CrossRawHeatMapCollection', 'CrossWordHeatMap', 'CrossParsedHeatMap', 'CrossSyntacticHeatMapPair']
+__all__ = [
+    "CrossGlobalHeatMap",
+    "CrossRawHeatMapCollection",
+    "CrossWordHeatMap",
+    "CrossParsedHeatMap",
+    "CrossSyntacticHeatMapPair",
+]
 
 
-def plot_overlay_heat_map(im, heat_map, word=None, out_file=None, crop=None, color_normalize=True, ax=None):
+def plot_overlay_heat_map(
+    im, heat_map, word=None, out_file=None, crop=None, color_normalize=True, ax=None
+):
     # type: (PIL.Image.Image | np.ndarray, torch.Tensor, str, Path, int, bool, plt.Axes) -> None
     if ax is None:
         plt.clf()
-        plt.rcParams.update({'font.size': 24})
+        plt.rcParams.update({"font.size": 24})
         plt_ = plt
     else:
         plt_ = ax
@@ -33,10 +39,12 @@ def plot_overlay_heat_map(im, heat_map, word=None, out_file=None, crop=None, col
             im = im[crop:-crop, crop:-crop]
 
         if color_normalize:
-            plt_.imshow(heat_map.squeeze().cpu().numpy(), cmap='jet')
+            plt_.imshow(heat_map.squeeze().cpu().numpy(), cmap="jet")
         else:
             heat_map = heat_map.clamp_(min=0, max=1)
-            plt_.imshow(heat_map.squeeze().cpu().numpy(), cmap='jet', vmin=0.0, vmax=1.0)
+            plt_.imshow(
+                heat_map.squeeze().cpu().numpy(), cmap="jet", vmin=0.0, vmax=1.0
+            )
 
         im = torch.from_numpy(im).float() / 255
         im = torch.cat((im, (1 - heat_map.unsqueeze(-1))), dim=-1)
@@ -61,7 +69,9 @@ class CrossWordHeatMap:
     def value(self):
         return self.heatmap
 
-    def plot_overlay(self, image, out_file=None, color_normalize=True, ax=None, **expand_kwargs):
+    def plot_overlay(
+        self, image, out_file=None, color_normalize=True, ax=None, **expand_kwargs
+    ):
         # type: (PIL.Image.Image | np.ndarray, Path, bool, plt.Axes, Dict[str, Any]) -> None
         plot_overlay_heat_map(
             image,
@@ -69,13 +79,17 @@ class CrossWordHeatMap:
             word=self.word,
             out_file=out_file,
             color_normalize=color_normalize,
-            ax=ax
+            ax=ax,
         )
 
-    def expand_as(self, image, absolute=False, threshold=None, plot=False, **plot_kwargs):
+    def expand_as(
+        self, image, absolute=False, threshold=None, plot=False, **plot_kwargs
+    ):
         # type: (PIL.Image.Image, bool, float, bool, Dict[str, Any]) -> torch.Tensor
         im = self.heatmap.unsqueeze(0).unsqueeze(0)
-        im = F.interpolate(im.float().detach(), size=(image.size[0], image.size[1]), mode='bicubic')
+        im = F.interpolate(
+            im.float().detach(), size=(image.size[0], image.size[1]), mode="bicubic"
+        )
 
         if not absolute:
             im = (im - im.min()) / (im.max() - im.min() + 1e-8)
@@ -127,12 +141,18 @@ class CrossGlobalHeatMap:
 
     def dependency_relations(self) -> Iterable[CrossSyntacticHeatMapPair]:
         for token in cached_nlp(self.prompt):
-            if token.dep_ != 'ROOT':
+            if token.dep_ != "ROOT":
                 try:
                     dep_heat_map = self.compute_word_heat_map(token.text)
                     head_heat_map = self.compute_word_heat_map(token.head.text)
 
-                    yield CrossSyntacticHeatMapPair(head_heat_map, dep_heat_map, token.head.text, token.text, token.dep_)
+                    yield CrossSyntacticHeatMapPair(
+                        head_heat_map,
+                        dep_heat_map,
+                        token.head.text,
+                        token.text,
+                        token.dep_,
+                    )
                 except ValueError:
                     pass
 
@@ -142,7 +162,9 @@ RawHeatMapKey = Tuple[int]  # layer
 
 class CrossRawHeatMapCollection:
     def __init__(self):
-        self.ids_to_heatmaps: Dict[RawHeatMapKey, torch.Tensor] = defaultdict(lambda: 0.0)
+        self.ids_to_heatmaps: Dict[RawHeatMapKey, torch.Tensor] = defaultdict(
+            lambda: 0.0
+        )
         self.ids_to_num_maps: Dict[RawHeatMapKey, int] = defaultdict(lambda: 0)
         self.device_type = None
 
@@ -150,7 +172,7 @@ class CrossRawHeatMapCollection:
         if self.device_type is None:
             self.device_type = heatmap.device.type
         with auto_autocast(device_type=self.device_type, dtype=torch.float32):
-            key = (layer_idx)
+            key = layer_idx
             self.ids_to_heatmaps[key] = self.ids_to_heatmaps[key] + heatmap
 
     def factors(self) -> Set[int]:

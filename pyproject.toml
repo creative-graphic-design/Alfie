@@ -1,0 +1,27 @@
+[project]
+name = "alfie"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "beautifulsoup4~=4.12.3",
+    "diffusers[torch]>=0.29.2",
+    "einops~=0.7.0",
+    "ftfy~=6.2.0",
+    "matplotlib>=3.9.2",
+    "nltk~=3.8.1",
+    "numpy<2.0.0",
+    "opencv-contrib-python~=4.9.0.80",
+    "protobuf<3.21.0",
+    "sentencepiece>=0.2.0",
+    "spacy~=3.7.5",
+    "transformers>=4.43.3",
+]
+
+[dependency-groups]
+dev = ["mypy>=1.0.0", "pytest>=6.0.0", "ruff>=0.1.5"]
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true
