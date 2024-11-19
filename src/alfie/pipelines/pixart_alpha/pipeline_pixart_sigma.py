@@ -1,4 +1,4 @@
-from typing import Callable, List, Optional, Tuple, Union
+from typing import Callable, List, Optional, Sequence, Tuple, Union
 
 import nltk
 import torch
@@ -13,11 +13,16 @@ from diffusers.pipelines.pixart_alpha.pipeline_pixart_sigma import (
     PixArtSigmaPipeline,
     retrieve_timesteps,
 )
-from diffusers.schedulers import KarrasDiffusionSchedulers
+from diffusers.schedulers import (
+    DPMSolverMultistepScheduler,
+    EulerAncestralDiscreteScheduler,
+    EulerDiscreteScheduler,
+    KarrasDiffusionSchedulers,
+)
 from diffusers.utils import deprecate, logging
 from transformers import T5EncoderModel, T5Tokenizer
 
-from alfie.models import AlfieAttnProcessor2_0
+from alfie.models import AlfieAttnProcessor2_0, AlfinePixArtTransformer2DModel
 from alfie.utils import normalize_masks
 
 logger = logging.get_logger(__name__)
@@ -65,6 +70,98 @@ ASPECT_RATIO_2048_BIN = {
     "4.0": [4096.0, 1024.0],
 }
 
+NOUNS_TO_EXCLUDE: List[str] = [
+    "image",
+    "images",
+    "picture",
+    "pictures",
+    "photo",
+    "photograph",
+    "photographs",
+    "illustration",
+    "paintings",
+    "drawing",
+    "drawings",
+    "sketch",
+    "sketches",
+    "art",
+    "arts",
+    "artwork",
+    "artworks",
+    "poster",
+    "posters",
+    "cover",
+    "covers",
+    "collage",
+    "collages",
+    "design",
+    "designs",
+    "graphic",
+    "graphics",
+    "logo",
+    "logos",
+    "icon",
+    "icons",
+    "symbol",
+    "symbols",
+    "emblem",
+    "emblems",
+    "badge",
+    "badges",
+    "stamp",
+    "stamps",
+    "img",
+    "video",
+    "videos",
+    "clip",
+    "clips",
+    "film",
+    "films",
+    "movie",
+    "movies",
+    "meme",
+    "grand",
+    "sticker",
+    "stickers",
+    "banner",
+    "banners",
+    "billboard",
+    "billboards",
+    "label",
+    "labels",
+    "scene",
+    "art",
+    "png",
+    "jpg",
+    "jpeg",
+    "gif",
+    "www",
+    "com",
+    "net",
+    "org",
+    "http",
+    "https",
+    "html",
+    "css",
+    "js",
+    "php",
+    "scene",
+    "view",
+    "m3",
+]
+
+
+def download_nltk_data():
+    try:
+        nltk.data.find("tokenizers/punkt")
+    except LookupError:
+        nltk.download("punkt")
+
+    try:
+        nltk.data.find("taggers/averaged_perceptron_tagger")
+    except LookupError:
+        nltk.download("averaged_perceptron_tagger")
+
 
 class AlfiePixArtSigmaPipeline(PixArtSigmaPipeline):
     def __init__(
@@ -76,6 +173,48 @@ class AlfiePixArtSigmaPipeline(PixArtSigmaPipeline):
         scheduler: KarrasDiffusionSchedulers,
     ):
         super().__init__(tokenizer, text_encoder, vae, transformer, scheduler)
+
+    @classmethod
+    def from_alfie_setting(
+        cls,
+        image_size: int,
+        scheduler_name: str,
+        torch_dtype: torch.dtype,
+        pipeline_id: str = "PixArt-alpha/PixArt-Sigma-XL-2-1024-MS",
+    ) -> "AlfiePixArtSigmaPipeline":
+        download_nltk_data()
+
+        if image_size == 256:
+            denoiser_id = "PixArt-alpha/PixArt-Sigma-XL-2-256x256"
+        elif image_size == 512:
+            denoiser_id = "PixArt-alpha/PixArt-Sigma-XL-2-512-MS"
+        else:
+            raise ValueError(f"Invalid image size: {image_size}")
+
+        transformer = AlfinePixArtTransformer2DModel.from_pretrained(
+            denoiser_id,
+            subfolder="transformer",
+            use_safetensors=True,
+            torch_dtype=torch.float16,
+        )
+
+        dpm_scheduler = DPMSolverMultistepScheduler.from_pretrained(
+            pipeline_id, subfolder="scheduler"
+        )
+        if scheduler_name == "euler":
+            eul_scheduler = EulerDiscreteScheduler.from_config(
+                config=dpm_scheduler.config,
+            )
+        elif scheduler_name == "euler_ancestral":
+            eul_scheduler = EulerAncestralDiscreteScheduler.from_config(
+                config=dpm_scheduler.config,
+            )
+        else:
+            raise ValueError(f"Invalid scheduler: {scheduler_name}")
+
+        return cls.from_pretrained(
+            pipeline_id, transformer=transformer, scheduler=eul_scheduler
+        )
 
     def create_generation_mask(
         self,
@@ -336,7 +475,7 @@ class AlfiePixArtSigmaPipeline(PixArtSigmaPipeline):
         keep_cross_attention_maps: bool = True,
         keep_self_attention_maps: bool = True,
         centering: bool = False,
-        nouns_to_exclude=None,
+        nouns_to_exclude: Sequence[str] = NOUNS_TO_EXCLUDE,
         disable_tqdm: bool = False,
         **kwargs,
     ) -> Union[ImagePipelineOutput, Tuple]:
