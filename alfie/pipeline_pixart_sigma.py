@@ -19,19 +19,13 @@ import urllib.parse as ul
 from typing import Callable, List, Optional, Tuple, Union
 
 import torch
-import numpy as np
 from transformers import T5EncoderModel, T5Tokenizer
-from PIL import Image
-from transformers.image_transforms import rescale, normalize, to_channel_dimension_format
-from transformers.image_utils import ChannelDimension
 from diffusers import AutoencoderKL
 
 from diffusers.image_processor import PixArtImageProcessor
 from .transformer_2d import Transformer2DModel
 from .attn_processor import AttnProcessor2_0
-import torch.nn.functional as F
 import nltk
-from torch.autograd import grad
 from diffusers.models import AutoencoderKL
 from diffusers.schedulers import DPMSolverMultistepScheduler
 from diffusers.utils import (
@@ -124,11 +118,11 @@ EXAMPLE_DOC_STRING = """
 
 # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.retrieve_timesteps
 def retrieve_timesteps(
-        scheduler,
-        num_inference_steps: Optional[int] = None,
-        device: Optional[Union[str, torch.device]] = None,
-        timesteps: Optional[List[int]] = None,
-        **kwargs,
+    scheduler,
+    num_inference_steps: Optional[int] = None,
+    device: Optional[Union[str, torch.device]] = None,
+    timesteps: Optional[List[int]] = None,
+    **kwargs,
 ):
     """
     Calls the scheduler's `set_timesteps` method and retrieves timesteps from the scheduler after the call. Handles
@@ -152,7 +146,9 @@ def retrieve_timesteps(
         second element is the number of inference steps.
     """
     if timesteps is not None:
-        accepts_timesteps = "timesteps" in set(inspect.signature(scheduler.set_timesteps).parameters.keys())
+        accepts_timesteps = "timesteps" in set(
+            inspect.signature(scheduler.set_timesteps).parameters.keys()
+        )
         if not accepts_timesteps:
             raise ValueError(
                 f"The current scheduler class {scheduler.__class__}'s `set_timesteps` does not support custom"
@@ -192,37 +188,43 @@ class PixArtSigmaPipeline(DiffusionPipeline):
     model_cpu_offload_seq = "text_encoder->transformer->vae"
 
     def __init__(
-            self,
-            tokenizer: T5Tokenizer,
-            text_encoder: T5EncoderModel,
-            vae: AutoencoderKL,
-            transformer: Transformer2DModel,
-            scheduler: DPMSolverMultistepScheduler,
+        self,
+        tokenizer: T5Tokenizer,
+        text_encoder: T5EncoderModel,
+        vae: AutoencoderKL,
+        transformer: Transformer2DModel,
+        scheduler: DPMSolverMultistepScheduler,
     ):
         super().__init__()
 
         self.register_modules(
-            tokenizer=tokenizer, text_encoder=text_encoder, vae=vae, transformer=transformer, scheduler=scheduler
+            tokenizer=tokenizer,
+            text_encoder=text_encoder,
+            vae=vae,
+            transformer=transformer,
+            scheduler=scheduler,
         )
 
         self.vae_scale_factor = 2 ** (len(self.vae.config.block_out_channels) - 1)
-        self.image_processor = PixArtImageProcessor(vae_scale_factor=self.vae_scale_factor)
+        self.image_processor = PixArtImageProcessor(
+            vae_scale_factor=self.vae_scale_factor
+        )
 
     # Copied from diffusers.pipelines.pixart_alpha.pipeline_pixart_alpha.PixArtAlphaPipeline.encode_prompt
     def encode_prompt(
-            self,
-            prompt: Union[str, List[str]],
-            do_classifier_free_guidance: bool = True,
-            negative_prompt: str = "",
-            num_images_per_prompt: int = 1,
-            device: Optional[torch.device] = None,
-            prompt_embeds: Optional[torch.FloatTensor] = None,
-            negative_prompt_embeds: Optional[torch.FloatTensor] = None,
-            prompt_attention_mask: Optional[torch.FloatTensor] = None,
-            negative_prompt_attention_mask: Optional[torch.FloatTensor] = None,
-            clean_caption: bool = False,
-            max_sequence_length: int = 120,
-            **kwargs,
+        self,
+        prompt: Union[str, List[str]],
+        do_classifier_free_guidance: bool = True,
+        negative_prompt: str = "",
+        num_images_per_prompt: int = 1,
+        device: Optional[torch.device] = None,
+        prompt_embeds: Optional[torch.FloatTensor] = None,
+        negative_prompt_embeds: Optional[torch.FloatTensor] = None,
+        prompt_attention_mask: Optional[torch.FloatTensor] = None,
+        negative_prompt_attention_mask: Optional[torch.FloatTensor] = None,
+        clean_caption: bool = False,
+        max_sequence_length: int = 120,
+        **kwargs,
     ):
         r"""
         Encodes the prompt into text encoder hidden states.
@@ -272,19 +274,23 @@ class PixArtSigmaPipeline(DiffusionPipeline):
             prompt = self._text_preprocessing(prompt, clean_caption=clean_caption)
             text_inputs = self.tokenizer(
                 prompt,
-                padding='max_length',
+                padding="max_length",
                 max_length=max_length,
                 truncation=True,
                 add_special_tokens=True,
                 return_tensors="pt",
             )
             text_input_ids = text_inputs.input_ids
-            untruncated_ids = self.tokenizer(prompt, padding="longest", return_tensors="pt").input_ids
+            untruncated_ids = self.tokenizer(
+                prompt, padding="longest", return_tensors="pt"
+            ).input_ids
 
-            if untruncated_ids.shape[-1] >= text_input_ids.shape[-1] and not torch.equal(
-                    text_input_ids, untruncated_ids
-            ):
-                removed_text = self.tokenizer.batch_decode(untruncated_ids[:, max_length - 1: -1])
+            if untruncated_ids.shape[-1] >= text_input_ids.shape[
+                -1
+            ] and not torch.equal(text_input_ids, untruncated_ids):
+                removed_text = self.tokenizer.batch_decode(
+                    untruncated_ids[:, max_length - 1 : -1]
+                )
                 logger.warning(
                     "The following part of your input was truncated because CLIP can only handle sequences up to"
                     f" {max_length} tokens: {removed_text}"
@@ -293,7 +299,9 @@ class PixArtSigmaPipeline(DiffusionPipeline):
             prompt_attention_mask = text_inputs.attention_mask
             prompt_attention_mask = prompt_attention_mask.to(device)
 
-            prompt_embeds = self.text_encoder(text_input_ids.to(device), attention_mask=prompt_attention_mask)
+            prompt_embeds = self.text_encoder(
+                text_input_ids.to(device), attention_mask=prompt_attention_mask
+            )
             prompt_embeds = prompt_embeds[0]
 
         if self.text_encoder is not None:
@@ -308,14 +316,18 @@ class PixArtSigmaPipeline(DiffusionPipeline):
         bs_embed, seq_len, _ = prompt_embeds.shape
         # duplicate text embeddings and attention mask for each generation per prompt, using mps friendly method
         prompt_embeds = prompt_embeds.repeat(1, num_images_per_prompt, 1)
-        prompt_embeds = prompt_embeds.view(bs_embed * num_images_per_prompt, seq_len, -1)
+        prompt_embeds = prompt_embeds.view(
+            bs_embed * num_images_per_prompt, seq_len, -1
+        )
         prompt_attention_mask = prompt_attention_mask.view(bs_embed, -1)
         prompt_attention_mask = prompt_attention_mask.repeat(num_images_per_prompt, 1)
 
         # get unconditional embeddings for classifier free guidance
         if do_classifier_free_guidance and negative_prompt_embeds is None:
             uncond_tokens = [negative_prompt] * batch_size
-            uncond_tokens = self._text_preprocessing(uncond_tokens, clean_caption=clean_caption)
+            uncond_tokens = self._text_preprocessing(
+                uncond_tokens, clean_caption=clean_caption
+            )
             max_length = prompt_embeds.shape[1]
             uncond_input = self.tokenizer(
                 uncond_tokens,
@@ -330,7 +342,8 @@ class PixArtSigmaPipeline(DiffusionPipeline):
             negative_prompt_attention_mask = negative_prompt_attention_mask.to(device)
 
             negative_prompt_embeds = self.text_encoder(
-                uncond_input.input_ids.to(device), attention_mask=negative_prompt_attention_mask
+                uncond_input.input_ids.to(device),
+                attention_mask=negative_prompt_attention_mask,
             )
             negative_prompt_embeds = negative_prompt_embeds[0]
 
@@ -338,18 +351,33 @@ class PixArtSigmaPipeline(DiffusionPipeline):
             # duplicate unconditional embeddings for each generation per prompt, using mps friendly method
             seq_len = negative_prompt_embeds.shape[1]
 
-            negative_prompt_embeds = negative_prompt_embeds.to(dtype=dtype, device=device)
+            negative_prompt_embeds = negative_prompt_embeds.to(
+                dtype=dtype, device=device
+            )
 
-            negative_prompt_embeds = negative_prompt_embeds.repeat(1, num_images_per_prompt, 1)
-            negative_prompt_embeds = negative_prompt_embeds.view(batch_size * num_images_per_prompt, seq_len, -1)
+            negative_prompt_embeds = negative_prompt_embeds.repeat(
+                1, num_images_per_prompt, 1
+            )
+            negative_prompt_embeds = negative_prompt_embeds.view(
+                batch_size * num_images_per_prompt, seq_len, -1
+            )
 
-            negative_prompt_attention_mask = negative_prompt_attention_mask.view(bs_embed, -1)
-            negative_prompt_attention_mask = negative_prompt_attention_mask.repeat(num_images_per_prompt, 1)
+            negative_prompt_attention_mask = negative_prompt_attention_mask.view(
+                bs_embed, -1
+            )
+            negative_prompt_attention_mask = negative_prompt_attention_mask.repeat(
+                num_images_per_prompt, 1
+            )
         else:
             negative_prompt_embeds = None
             negative_prompt_attention_mask = None
 
-        return prompt_embeds, prompt_attention_mask, negative_prompt_embeds, negative_prompt_attention_mask
+        return (
+            prompt_embeds,
+            prompt_attention_mask,
+            negative_prompt_embeds,
+            negative_prompt_attention_mask,
+        )
 
     # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.StableDiffusionPipeline.prepare_extra_step_kwargs
     def prepare_extra_step_kwargs(self, generator, eta):
@@ -358,35 +386,42 @@ class PixArtSigmaPipeline(DiffusionPipeline):
         # eta corresponds to η in DDIM paper: https://arxiv.org/abs/2010.02502
         # and should be between [0, 1]
 
-        accepts_eta = "eta" in set(inspect.signature(self.scheduler.step).parameters.keys())
+        accepts_eta = "eta" in set(
+            inspect.signature(self.scheduler.step).parameters.keys()
+        )
         extra_step_kwargs = {}
         if accepts_eta:
             extra_step_kwargs["eta"] = eta
 
         # check if the scheduler accepts generator
-        accepts_generator = "generator" in set(inspect.signature(self.scheduler.step).parameters.keys())
+        accepts_generator = "generator" in set(
+            inspect.signature(self.scheduler.step).parameters.keys()
+        )
         if accepts_generator:
             extra_step_kwargs["generator"] = generator
         return extra_step_kwargs
 
     # Copied from diffusers.pipelines.pixart_alpha.pipeline_pixart_alpha.PixArtAlphaPipeline.check_inputs
     def check_inputs(
-            self,
-            prompt,
-            height,
-            width,
-            negative_prompt,
-            callback_steps,
-            prompt_embeds=None,
-            negative_prompt_embeds=None,
-            prompt_attention_mask=None,
-            negative_prompt_attention_mask=None,
+        self,
+        prompt,
+        height,
+        width,
+        negative_prompt,
+        callback_steps,
+        prompt_embeds=None,
+        negative_prompt_embeds=None,
+        prompt_attention_mask=None,
+        negative_prompt_attention_mask=None,
     ):
         if height % 8 != 0 or width % 8 != 0:
-            raise ValueError(f"`height` and `width` have to be divisible by 8 but are {height} and {width}.")
+            raise ValueError(
+                f"`height` and `width` have to be divisible by 8 but are {height} and {width}."
+            )
 
         if (callback_steps is None) or (
-                callback_steps is not None and (not isinstance(callback_steps, int) or callback_steps <= 0)
+            callback_steps is not None
+            and (not isinstance(callback_steps, int) or callback_steps <= 0)
         ):
             raise ValueError(
                 f"`callback_steps` has to be a positive integer but is {callback_steps} of type"
@@ -402,8 +437,12 @@ class PixArtSigmaPipeline(DiffusionPipeline):
             raise ValueError(
                 "Provide either `prompt` or `prompt_embeds`. Cannot leave both `prompt` and `prompt_embeds` undefined."
             )
-        elif prompt is not None and (not isinstance(prompt, str) and not isinstance(prompt, list)):
-            raise ValueError(f"`prompt` has to be of type `str` or `list` but is {type(prompt)}")
+        elif prompt is not None and (
+            not isinstance(prompt, str) and not isinstance(prompt, list)
+        ):
+            raise ValueError(
+                f"`prompt` has to be of type `str` or `list` but is {type(prompt)}"
+            )
 
         if prompt is not None and negative_prompt_embeds is not None:
             raise ValueError(
@@ -418,10 +457,17 @@ class PixArtSigmaPipeline(DiffusionPipeline):
             )
 
         if prompt_embeds is not None and prompt_attention_mask is None:
-            raise ValueError("Must provide `prompt_attention_mask` when specifying `prompt_embeds`.")
+            raise ValueError(
+                "Must provide `prompt_attention_mask` when specifying `prompt_embeds`."
+            )
 
-        if negative_prompt_embeds is not None and negative_prompt_attention_mask is None:
-            raise ValueError("Must provide `negative_prompt_attention_mask` when specifying `negative_prompt_embeds`.")
+        if (
+            negative_prompt_embeds is not None
+            and negative_prompt_attention_mask is None
+        ):
+            raise ValueError(
+                "Must provide `negative_prompt_attention_mask` when specifying `negative_prompt_embeds`."
+            )
 
         if prompt_embeds is not None and negative_prompt_embeds is not None:
             if prompt_embeds.shape != negative_prompt_embeds.shape:
@@ -440,12 +486,16 @@ class PixArtSigmaPipeline(DiffusionPipeline):
     # Copied from diffusers.pipelines.deepfloyd_if.pipeline_if.IFPipeline._text_preprocessing
     def _text_preprocessing(self, text, clean_caption=False):
         if clean_caption and not is_bs4_available():
-            logger.warning(BACKENDS_MAPPING["bs4"][-1].format("Setting `clean_caption=True`"))
+            logger.warning(
+                BACKENDS_MAPPING["bs4"][-1].format("Setting `clean_caption=True`")
+            )
             logger.warning("Setting `clean_caption` to False...")
             clean_caption = False
 
         if clean_caption and not is_ftfy_available():
-            logger.warning(BACKENDS_MAPPING["ftfy"][-1].format("Setting `clean_caption=True`"))
+            logger.warning(
+                BACKENDS_MAPPING["ftfy"][-1].format("Setting `clean_caption=True`")
+            )
             logger.warning("Setting `clean_caption` to False...")
             clean_caption = False
 
@@ -536,13 +586,17 @@ class PixArtSigmaPipeline(DiffusionPipeline):
         # "123456.."
         caption = re.sub(r"\b\d{6,}\b", "", caption)
         # filenames:
-        caption = re.sub(r"[\S]+\.(?:png|jpg|jpeg|bmp|webp|eps|pdf|apk|mp4)", "", caption)
+        caption = re.sub(
+            r"[\S]+\.(?:png|jpg|jpeg|bmp|webp|eps|pdf|apk|mp4)", "", caption
+        )
 
         #
         caption = re.sub(r"[\"\']{2,}", r'"', caption)  # """AUSVERKAUFT"""
         caption = re.sub(r"[\.]{2,}", r" ", caption)  # """AUSVERKAUFT"""
 
-        caption = re.sub(self.bad_punct_regex, r" ", caption)  # ***AUSVERKAUFT***, #AUSVERKAUFT
+        caption = re.sub(
+            self.bad_punct_regex, r" ", caption
+        )  # ***AUSVERKAUFT***, #AUSVERKAUFT
         caption = re.sub(r"\s+\.\s+", r" ", caption)  # " . "
 
         # this-is-my-cute-cat / this_is_my_cute_cat
@@ -560,10 +614,14 @@ class PixArtSigmaPipeline(DiffusionPipeline):
         caption = re.sub(r"(worldwide\s+)?(free\s+)?shipping", "", caption)
         caption = re.sub(r"(free\s)?download(\sfree)?", "", caption)
         caption = re.sub(r"\bclick\b\s(?:for|on)\s\w+", "", caption)
-        caption = re.sub(r"\b(?:png|jpg|jpeg|bmp|webp|eps|pdf|apk|mp4)(\simage[s]?)?", "", caption)
+        caption = re.sub(
+            r"\b(?:png|jpg|jpeg|bmp|webp|eps|pdf|apk|mp4)(\simage[s]?)?", "", caption
+        )
         caption = re.sub(r"\bpage\s+\d+\b", "", caption)
 
-        caption = re.sub(r"\b\d*[a-zA-Z]+\d+[a-zA-Z]+\d+[a-zA-Z\d]*\b", r" ", caption)  # j2d1a2a...
+        caption = re.sub(
+            r"\b\d*[a-zA-Z]+\d+[a-zA-Z]+\d+[a-zA-Z\d]*\b", r" ", caption
+        )  # j2d1a2a...
 
         caption = re.sub(r"\b\d+\.?\d*[xх×]\d+\.?\d*\b", "", caption)
 
@@ -581,7 +639,17 @@ class PixArtSigmaPipeline(DiffusionPipeline):
         return caption.strip()
 
     # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.StableDiffusionPipeline.prepare_latents
-    def prepare_latents(self, batch_size, num_channels_latents, height, width, dtype, device, generator, latents=None):
+    def prepare_latents(
+        self,
+        batch_size,
+        num_channels_latents,
+        height,
+        width,
+        dtype,
+        device,
+        generator,
+        latents=None,
+    ):
         shape = (
             batch_size,
             num_channels_latents,
@@ -595,7 +663,9 @@ class PixArtSigmaPipeline(DiffusionPipeline):
             )
 
         if latents is None:
-            latents = randn_tensor(shape, generator=generator, device=device, dtype=dtype)
+            latents = randn_tensor(
+                shape, generator=generator, device=device, dtype=dtype
+            )
         else:
             latents = latents.to(device)
 
@@ -604,48 +674,62 @@ class PixArtSigmaPipeline(DiffusionPipeline):
         return latents
 
     @staticmethod
-    def create_generation_mask(latent_h: int, latent_w: int, mask_type: str, dtype: torch.dtype,
-                               beta: float = 0.00, border_h: int = None, border_w: int = None) -> torch.Tensor:
+    def create_generation_mask(
+        latent_h: int,
+        latent_w: int,
+        mask_type: str,
+        dtype: torch.dtype,
+        beta: float = 0.00,
+        border_h: int = None,
+        border_w: int = None,
+    ) -> torch.Tensor:
         border_size_h = latent_h // 4 if border_h is None else border_h
         border_size_w = latent_w // 4 if border_w is None else border_w
         mask = torch.full((latent_h, latent_w), fill_value=beta).to(dtype)
         if mask_type == "center":
             mask[border_size_h:-border_size_h, border_size_w:-border_size_w] = 1
         elif mask_type == "bottom":
-            mask[border_size_h * 2:, border_size_w:-border_size_w] = 1
+            mask[border_size_h * 2 :, border_size_w:-border_size_w] = 1
         elif mask_type == "top":
-            mask[:-border_size_h * 2, border_size_w:-border_size_w] = 1
+            mask[: -border_size_h * 2, border_size_w:-border_size_w] = 1
         elif mask_type == "right":
-            mask[border_size_h:-border_size_h, border_size_w * 2:] = 1
+            mask[border_size_h:-border_size_h, border_size_w * 2 :] = 1
         elif mask_type == "left":
-            mask[border_size_h:-border_size_h, :-border_size_w * 2] = 1
+            mask[border_size_h:-border_size_h, : -border_size_w * 2] = 1
         elif mask_type == "top_right":
-            mask[:-border_size_h * 2, border_size_w * 2:] = 1
+            mask[: -border_size_h * 2, border_size_w * 2 :] = 1
         elif mask_type == "top_left":
-            mask[:-border_size_h * 2, :-border_size_w * 2] = 1
+            mask[: -border_size_h * 2, : -border_size_w * 2] = 1
         elif mask_type == "bottom_right":
-            mask[border_size_h * 2:, border_size_w * 2:] = 1
+            mask[border_size_h * 2 :, border_size_w * 2 :] = 1
         elif mask_type == "bottom_left":
-            mask[border_size_h * 2:, :-border_size_w * 2] = 1
-        elif mask_type == 'full':
+            mask[border_size_h * 2 :, : -border_size_w * 2] = 1
+        elif mask_type == "full":
             mask = torch.ones((latent_h, latent_w)).to(dtype)
         else:
             raise ValueError(f"Invalid mask type: {mask_type}")
         return mask
-
 
     def parse_nouns(self, prompt: str, nouns_to_exclude=None):
         if nouns_to_exclude is None:
             nouns_to_exclude = []
         prompt = prompt.lower()
         words = nltk.word_tokenize(prompt)
-        nouns = [word for word, pos in nltk.pos_tag(words) if pos[:2] == 'NN' and word not in nouns_to_exclude]
+        nouns = [
+            word
+            for word, pos in nltk.pos_tag(words)
+            if pos[:2] == "NN" and word not in nouns_to_exclude
+        ]
         tokens = self.tokenizer.tokenize(prompt)
-        num_prompt_tokens = len(tokens) + 1  
+        num_prompt_tokens = len(tokens) + 1
         nouns_indexes = []
         for noun in nouns:
             search_tokens = self.tokenizer.tokenize(noun.lower())
-            start_indexes = [x for x in range(len(tokens)) if tokens[x:x + len(search_tokens)] == search_tokens]
+            start_indexes = [
+                x
+                for x in range(len(tokens))
+                if tokens[x : x + len(search_tokens)] == search_tokens
+            ]
             merge_indexes = []
             for index in start_indexes:
                 merge_indexes += [i + index for i in range(0, len(search_tokens))]
@@ -654,35 +738,35 @@ class PixArtSigmaPipeline(DiffusionPipeline):
 
     @replace_example_docstring(EXAMPLE_DOC_STRING)
     def __call__(
-            self,
-            prompt: Union[str, List[str]] = None,
-            negative_prompt: str = "",
-            num_inference_steps: int = 20,
-            timesteps: List[int] = None,
-            guidance_scale: float = 4.5,
-            num_images_per_prompt: Optional[int] = 1,
-            height: Optional[int] = None,
-            width: Optional[int] = None,
-            eta: float = 0.0,
-            generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
-            latents: Optional[torch.FloatTensor] = None,
-            prompt_embeds: Optional[torch.FloatTensor] = None,
-            prompt_attention_mask: Optional[torch.FloatTensor] = None,
-            negative_prompt_embeds: Optional[torch.FloatTensor] = None,
-            negative_prompt_attention_mask: Optional[torch.FloatTensor] = None,
-            output_type: Optional[str] = "pil",
-            return_dict: bool = True,
-            callback: Optional[Callable[[int, int, torch.FloatTensor], None]] = None,
-            callback_steps: int = 1,
-            clean_caption: bool = True,
-            use_resolution_binning: bool = True,
-            max_sequence_length: int = 300,
-            keep_cross_attention_maps: bool = True,
-            keep_self_attention_maps: bool = True,
-            centering: bool = False,
-            nouns_to_exclude=None,
-            disable_tqdm: bool = False,
-            **kwargs,
+        self,
+        prompt: Union[str, List[str]] = None,
+        negative_prompt: str = "",
+        num_inference_steps: int = 20,
+        timesteps: List[int] = None,
+        guidance_scale: float = 4.5,
+        num_images_per_prompt: Optional[int] = 1,
+        height: Optional[int] = None,
+        width: Optional[int] = None,
+        eta: float = 0.0,
+        generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
+        latents: Optional[torch.FloatTensor] = None,
+        prompt_embeds: Optional[torch.FloatTensor] = None,
+        prompt_attention_mask: Optional[torch.FloatTensor] = None,
+        negative_prompt_embeds: Optional[torch.FloatTensor] = None,
+        negative_prompt_attention_mask: Optional[torch.FloatTensor] = None,
+        output_type: Optional[str] = "pil",
+        return_dict: bool = True,
+        callback: Optional[Callable[[int, int, torch.FloatTensor], None]] = None,
+        callback_steps: int = 1,
+        clean_caption: bool = True,
+        use_resolution_binning: bool = True,
+        max_sequence_length: int = 300,
+        keep_cross_attention_maps: bool = True,
+        keep_self_attention_maps: bool = True,
+        centering: bool = False,
+        nouns_to_exclude=None,
+        disable_tqdm: bool = False,
+        **kwargs,
     ) -> Union[ImagePipelineOutput, Tuple]:
         """
         Function invoked when calling the pipeline for generation.
@@ -775,7 +859,9 @@ class PixArtSigmaPipeline(DiffusionPipeline):
             else:
                 raise ValueError("Invalid sample size")
             orig_height, orig_width = height, width
-            height, width = self.image_processor.classify_height_width_bin(height, width, ratios=aspect_ratio_bin)
+            height, width = self.image_processor.classify_height_width_bin(
+                height, width, ratios=aspect_ratio_bin
+            )
 
         self.check_inputs(
             prompt,
@@ -798,7 +884,7 @@ class PixArtSigmaPipeline(DiffusionPipeline):
             batch_size = prompt_embeds.shape[0]
 
         device = self._execution_device  # THIS AUTOMATICALLY CHANGES TO CPU
-        device = torch.device('cuda')
+        device = torch.device("cuda")
 
         # here `guidance_scale` is defined analog to the guidance weight `w` of equation (2)
         # of the Imagen paper: https://arxiv.org/pdf/2205.11487.pdf . `guidance_scale = 1`
@@ -827,13 +913,19 @@ class PixArtSigmaPipeline(DiffusionPipeline):
         )
 
         prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds], dim=0)
-        prompt_attention_mask = torch.cat([negative_prompt_attention_mask, prompt_attention_mask], dim=0)
+        prompt_attention_mask = torch.cat(
+            [negative_prompt_attention_mask, prompt_attention_mask], dim=0
+        )
 
         foreground_prompt = prompt[1] if centering else prompt
-        prompt_clean = self._text_preprocessing(foreground_prompt, clean_caption=clean_caption)[0]
+        prompt_clean = self._text_preprocessing(
+            foreground_prompt, clean_caption=clean_caption
+        )[0]
 
         # 4. Prepare timesteps
-        timesteps, num_inference_steps = retrieve_timesteps(self.scheduler, num_inference_steps, device, timesteps)
+        timesteps, num_inference_steps = retrieve_timesteps(
+            self.scheduler, num_inference_steps, device, timesteps
+        )
 
         # 5. Prepare latents.
         latent_channels = self.transformer.config.in_channels
@@ -856,19 +948,35 @@ class PixArtSigmaPipeline(DiffusionPipeline):
         # 6.2 Modified
         latent_h, latent_w = latents.shape[-2:]
         mask_md = self.create_generation_mask(
-            latent_h=latent_h, latent_w=latent_w, mask_type='center', dtype=prompt_embeds.dtype,
-            beta=0.0, border_h=latent_h // 8, border_w=latent_w // 8)
+            latent_h=latent_h,
+            latent_w=latent_w,
+            mask_type="center",
+            dtype=prompt_embeds.dtype,
+            beta=0.0,
+            border_h=latent_h // 8,
+            border_w=latent_w // 8,
+        )
 
-        processor = AttnProcessor2_0(keep_cross_attn_maps=keep_cross_attention_maps, keep_self_attn_maps=keep_self_attention_maps, tokenizer=self.tokenizer)
+        processor = AttnProcessor2_0(
+            keep_cross_attn_maps=keep_cross_attention_maps,
+            keep_self_attn_maps=keep_self_attention_maps,
+            tokenizer=self.tokenizer,
+        )
         self.transformer.set_attn_processor(processor)
-        nouns, nouns_indexes, num_prompt_tokens = self.parse_nouns(prompt_clean, nouns_to_exclude=nouns_to_exclude)
+        nouns, nouns_indexes, num_prompt_tokens = self.parse_nouns(
+            prompt_clean, nouns_to_exclude=nouns_to_exclude
+        )
         if len(nouns_indexes) == 0:
-            logger.warning(f"No nouns found in the prompt {prompt_clean}. Returning None and skipping the generation.")
+            logger.warning(
+                f"No nouns found in the prompt {prompt_clean}. Returning None and skipping the generation."
+            )
             return None, None, None
 
-        self.text_encoder = self.text_encoder.to('cpu')
+        self.text_encoder = self.text_encoder.to("cpu")
         # 7. Denoising loop
-        num_warmup_steps = max(len(timesteps) - num_inference_steps * self.scheduler.order, 0)
+        num_warmup_steps = max(
+            len(timesteps) - num_inference_steps * self.scheduler.order, 0
+        )
 
         self.set_progress_bar_config(disable=disable_tqdm)
         with self.progress_bar(total=num_inference_steps) as progress_bar:
@@ -879,9 +987,17 @@ class PixArtSigmaPipeline(DiffusionPipeline):
                 processor.l_iteration_sa = 0
 
                 with torch.no_grad():
-                    latents = latents.repeat(batch_size, 1, 1, 1) if centering else latents
-                    latent_model_input = torch.cat([latents] * 2) if do_classifier_free_guidance else latents
-                    latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
+                    latents = (
+                        latents.repeat(batch_size, 1, 1, 1) if centering else latents
+                    )
+                    latent_model_input = (
+                        torch.cat([latents] * 2)
+                        if do_classifier_free_guidance
+                        else latents
+                    )
+                    latent_model_input = self.scheduler.scale_model_input(
+                        latent_model_input, t
+                    )
 
                     current_timestep = t.clone()
                     if not torch.is_tensor(current_timestep):
@@ -892,12 +1008,19 @@ class PixArtSigmaPipeline(DiffusionPipeline):
                             dtype = torch.float32 if is_mps else torch.float64
                         else:
                             dtype = torch.int32 if is_mps else torch.int64
-                        current_timestep = torch.tensor([current_timestep], dtype=dtype,
-                                                        device=latent_model_input.device)
+                        current_timestep = torch.tensor(
+                            [current_timestep],
+                            dtype=dtype,
+                            device=latent_model_input.device,
+                        )
                     elif len(current_timestep.shape) == 0:
-                        current_timestep = current_timestep[None].to(latent_model_input.device)
+                        current_timestep = current_timestep[None].to(
+                            latent_model_input.device
+                        )
                     # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
-                    current_timestep = current_timestep.expand(latent_model_input.shape[0])
+                    current_timestep = current_timestep.expand(
+                        latent_model_input.shape[0]
+                    )
 
                     # predict noise model_output
                     noise_pred = self.transformer(
@@ -912,7 +1035,9 @@ class PixArtSigmaPipeline(DiffusionPipeline):
                     # perform guidance
                     if do_classifier_free_guidance:
                         noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
-                        noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
+                        noise_pred = noise_pred_uncond + guidance_scale * (
+                            noise_pred_text - noise_pred_uncond
+                        )
 
                     # learned sigma
                     if self.transformer.config.out_channels // 2 == latent_channels:
@@ -921,27 +1046,42 @@ class PixArtSigmaPipeline(DiffusionPipeline):
                         noise_pred = noise_pred
 
                     # compute previous image: x_t -> x_t-1
-                    pred = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs, return_dict=True)
-                    latents = pred['prev_sample']
+                    pred = self.scheduler.step(
+                        noise_pred, t, latents, **extra_step_kwargs, return_dict=True
+                    )
+                    latents = pred["prev_sample"]
                     if centering:
-                        latents = (latents[0] * (1 - mask_md.cuda()) + latents[1] * mask_md.cuda()).unsqueeze(0)
+                        latents = (
+                            latents[0] * (1 - mask_md.cuda())
+                            + latents[1] * mask_md.cuda()
+                        ).unsqueeze(0)
 
                     if i == len(timesteps) - 1:
-                        latents_pred_x0 = pred['pred_original_sample'].to(torch.float16)
-                        decoded_x0 = self.vae.decode(latents_pred_x0 / self.vae.config.scaling_factor, return_dict=False)[0]
+                        latents_pred_x0 = pred["pred_original_sample"].to(torch.float16)
+                        decoded_x0 = self.vae.decode(
+                            latents_pred_x0 / self.vae.config.scaling_factor,
+                            return_dict=False,
+                        )[0]
                         decoded_x0 = (decoded_x0 / 2 + 0.5).clamp(0, 1)
 
                     # call the callback, if provided
-                    if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
+                    if i == len(timesteps) - 1 or (
+                        (i + 1) > num_warmup_steps
+                        and (i + 1) % self.scheduler.order == 0
+                    ):
                         progress_bar.update()
                         if callback is not None and i % callback_steps == 0:
                             step_idx = i // getattr(self.scheduler, "order", 1)
                             callback(step_idx, t, latents)
 
         if not output_type == "latent":
-            image = self.vae.decode(latents / self.vae.config.scaling_factor, return_dict=False)[0]
+            image = self.vae.decode(
+                latents / self.vae.config.scaling_factor, return_dict=False
+            )[0]
             if use_resolution_binning:
-                image = self.image_processor.resize_and_crop_tensor(image, orig_width, orig_height)
+                image = self.image_processor.resize_and_crop_tensor(
+                    image, orig_width, orig_height
+                )
         else:
             image = latents
 
@@ -951,10 +1091,7 @@ class PixArtSigmaPipeline(DiffusionPipeline):
         # Offload all models
         self.maybe_free_model_hooks()
 
-        heatmaps = {
-            'cross_heatmaps_fg_nouns': {},
-            'self_heatmaps_fg_nouns': {}
-        }
+        heatmaps = {"cross_heatmaps_fg_nouns": {}, "self_heatmaps_fg_nouns": {}}
 
         # Compute foreground maps
         self_heatmap_fg = processor.compute_global_self_heat_map()
@@ -962,16 +1099,32 @@ class PixArtSigmaPipeline(DiffusionPipeline):
         cross_heatmaps_fg = []
         for noun in nouns:
             cross_heatmap_noun = cross_heatmap_fg.compute_word_heat_map(noun)
-            self_heatmap_noun = self_heatmap_fg.compute_guided_heat_map(normalize_masks(cross_heatmap_noun.heatmap))
-            heatmaps['cross_heatmaps_fg_nouns'][noun] = normalize_masks(cross_heatmap_noun.expand_as(image[0]))
-            heatmaps['self_heatmaps_fg_nouns'][noun] = normalize_masks(self_heatmap_noun.expand_as(image[0]))
+            self_heatmap_noun = self_heatmap_fg.compute_guided_heat_map(
+                normalize_masks(cross_heatmap_noun.heatmap)
+            )
+            heatmaps["cross_heatmaps_fg_nouns"][noun] = normalize_masks(
+                cross_heatmap_noun.expand_as(image[0])
+            )
+            heatmaps["self_heatmaps_fg_nouns"][noun] = normalize_masks(
+                self_heatmap_noun.expand_as(image[0])
+            )
             cross_heatmaps_fg.append(cross_heatmap_noun)
 
-        cross_heatmaps_for_ff = normalize_masks(torch.stack([ca.heatmap for ca in cross_heatmaps_fg], dim=0).mean(dim=0))
-        ff = normalize_masks(self_heatmap_fg.compute_guided_heat_map(cross_heatmaps_for_ff).expand_as(image[0]))
-        cross_heatmaps_fg = normalize_masks(torch.stack([ca.expand_as(image[0]) for ca in cross_heatmaps_fg], dim=0).mean(dim=0))
-        heatmaps['cross_heatmap_fg'] = cross_heatmaps_fg
-        heatmaps['ff_heatmap'] = ff
+        cross_heatmaps_for_ff = normalize_masks(
+            torch.stack([ca.heatmap for ca in cross_heatmaps_fg], dim=0).mean(dim=0)
+        )
+        ff = normalize_masks(
+            self_heatmap_fg.compute_guided_heat_map(cross_heatmaps_for_ff).expand_as(
+                image[0]
+            )
+        )
+        cross_heatmaps_fg = normalize_masks(
+            torch.stack(
+                [ca.expand_as(image[0]) for ca in cross_heatmaps_fg], dim=0
+            ).mean(dim=0)
+        )
+        heatmaps["cross_heatmap_fg"] = cross_heatmaps_fg
+        heatmaps["ff_heatmap"] = ff
 
         if not return_dict:
             return image, heatmaps
