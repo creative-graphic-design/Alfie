@@ -1,21 +1,20 @@
+import argparse
+import logging
 from pathlib import Path
 
-from .pipeline_pixart_sigma import PixArtSigmaPipeline
-from .transformer_2d import Transformer2DModel
-from transformers import T5EncoderModel, T5Tokenizer
+import nltk
+import torch
+from accelerate.logging import get_logger
 from diffusers.models import AutoencoderKL
 from diffusers.schedulers import (
     DPMSolverMultistepScheduler,
     EulerAncestralDiscreteScheduler,
     EulerDiscreteScheduler,
 )
-import nltk
+from transformers import T5EncoderModel, T5Tokenizer
 
-import argparse
-import logging
-from accelerate.logging import get_logger
-
-import torch
+from alfie.models import AlfinePixArtTransformer2DModel
+from alfie.pipelines import AlfiePixArtSigmaPipeline
 
 torch.backends.cuda.matmul.allow_tf32 = True
 
@@ -62,7 +61,7 @@ def get_pipe(image_size, scheduler, device):
         pipeline_key, subfolder="vae", use_safetensors=True, torch_dtype=torch.float16
     )
 
-    model = Transformer2DModel.from_pretrained(
+    model = AlfinePixArtTransformer2DModel.from_pretrained(
         model_key,
         subfolder="transformer",
         use_safetensors=True,
@@ -91,7 +90,7 @@ def get_pipe(image_size, scheduler, device):
     else:
         raise ValueError(f"Invalid scheduler: {scheduler}")
 
-    pipe = PixArtSigmaPipeline.from_pretrained(
+    pipe = AlfiePixArtSigmaPipeline.from_pretrained(
         pipeline_key,
         transformer=model,
         text_encoder=text_encoder,

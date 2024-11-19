@@ -1,36 +1,31 @@
-from typing import Optional, List
+from typing import List, Optional
 
 import torch
 import torch.nn.functional as F
+from diffusers.models.attention_processor import Attention, AttnProcessor2_0
+from diffusers.utils import deprecate
 from einops import rearrange
 
-from .cross_heatmap import CrossRawHeatMapCollection, CrossGlobalHeatMap
-from .self_heatmap import SelfRawHeatMapCollection, SelfGlobalHeatMap
-from .utils import auto_autocast
-
-from diffusers.utils import deprecate, logging
-from diffusers.models.attention import Attention
-
-logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
+from alfie.models.cross_heatmap import CrossGlobalHeatMap, CrossRawHeatMapCollection
+from alfie.models.self_heatmap import SelfGlobalHeatMap, SelfRawHeatMapCollection
+from alfie.utils import auto_autocast
 
 
-class AttnProcessor2_0:
-    r"""
-    Processor for implementing scaled dot-product attention (enabled by default if you're using PyTorch 2.0).
-    """
-
+class AlfieAttnProcessor2_0(AttnProcessor2_0):
     def __init__(
         self,
         keep_cross_attn_maps: bool = True,
         keep_self_attn_maps: bool = True,
         tokenizer=None,
-    ):
+    ) -> None:
+        super().__init__()
+
         self.keep_cross_attn_maps = keep_cross_attn_maps
         self.ca_maps_fg = CrossRawHeatMapCollection()
         self.keep_self_attn_maps = keep_self_attn_maps
         self.sa_maps_fg = SelfRawHeatMapCollection()
 
-        self.h = self.w = 32
+        self.h, self.w = 32, 32
         self.num_prompt_tokens = None
         self.l_iteration_ca = 0
         self.l_iteration_sa = 0

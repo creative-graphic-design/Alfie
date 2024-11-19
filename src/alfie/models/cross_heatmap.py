@@ -1,15 +1,15 @@
 from collections import defaultdict
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import Any, Dict, Tuple, Set, Iterable
+from typing import Any, Dict, Iterable, Set, Tuple
 
-from matplotlib import pyplot as plt
 import numpy as np
 import spacy.tokens
 import torch
 import torch.nn.functional as F
+from matplotlib import pyplot as plt
 
-from .utils import compute_token_merge_indices, cached_nlp, auto_autocast
+from alfie.utils import auto_autocast, cached_nlp, compute_token_merge_indices
 
 __all__ = [
     "CrossGlobalHeatMap",
