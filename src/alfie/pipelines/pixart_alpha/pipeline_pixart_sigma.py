@@ -1,58 +1,40 @@
-# Copyright 2024 PixArt-Sigma Authors and The HuggingFace Team. All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+from dataclasses import dataclass
+from typing import Callable, List, Literal, Optional, Sequence, Tuple, Union
 
-import html
-import inspect
-import re
-import urllib.parse as ul
-from typing import Callable, List, Optional, Tuple, Union
-
-import torch
-from transformers import T5EncoderModel, T5Tokenizer
-from diffusers import AutoencoderKL
-
-from diffusers.image_processor import PixArtImageProcessor
-from .transformer_2d import Transformer2DModel
-from .attn_processor import AttnProcessor2_0
+import cv2
 import nltk
-from diffusers.models import AutoencoderKL
-from diffusers.schedulers import DPMSolverMultistepScheduler
-from diffusers.utils import (
-    BACKENDS_MAPPING,
-    deprecate,
-    is_bs4_available,
-    is_ftfy_available,
-    logging,
-    replace_example_docstring,
-)
-from diffusers.utils.torch_utils import randn_tensor
-from diffusers.pipelines.pipeline_utils import DiffusionPipeline, ImagePipelineOutput
+import numpy as np
+import torch
+import torch.nn.functional as F
+from diffusers.models import AutoencoderKL, PixArtTransformer2DModel
 from diffusers.pipelines.pixart_alpha.pipeline_pixart_alpha import (
     ASPECT_RATIO_256_BIN,
     ASPECT_RATIO_512_BIN,
     ASPECT_RATIO_1024_BIN,
 )
+from diffusers.pipelines.pixart_alpha.pipeline_pixart_sigma import (
+    PixArtSigmaPipeline,
+    retrieve_timesteps,
+)
+from diffusers.schedulers import (
+    DPMSolverMultistepScheduler,
+    EulerAncestralDiscreteScheduler,
+    EulerDiscreteScheduler,
+    KarrasDiffusionSchedulers,
+)
+from diffusers.utils import deprecate, logging
+from PIL import Image
+from PIL.Image import Image as PilImage
+from transformers import T5EncoderModel, T5Tokenizer
 
-from .utils import normalize_masks
+from alfie.models import AlfieAttnProcessor2_0, AlfinePixArtTransformer2DModel
+from alfie.utils import normalize_masks
 
-logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
+from .pipeline_output import AlfieHeatmaps, AlfieImagePipelineOutput
 
-if is_bs4_available():
-    from bs4 import BeautifulSoup
+logger = logging.get_logger(__name__)
 
-if is_ftfy_available():
-    import ftfy
+CutoutModel = Literal["grabcut", "vit-matte"]
 
 ASPECT_RATIO_2048_BIN = {
     "0.25": [1024.0, 4096.0],
@@ -97,120 +79,345 @@ ASPECT_RATIO_2048_BIN = {
     "4.0": [4096.0, 1024.0],
 }
 
-EXAMPLE_DOC_STRING = """
-    Examples:
-        ```py
-        >>> import torch
-        >>> from diffusers import PixArtSigmaPipeline
+NOUNS_TO_EXCLUDE: List[str] = [
+    "image",
+    "images",
+    "picture",
+    "pictures",
+    "photo",
+    "photograph",
+    "photographs",
+    "illustration",
+    "paintings",
+    "drawing",
+    "drawings",
+    "sketch",
+    "sketches",
+    "art",
+    "arts",
+    "artwork",
+    "artworks",
+    "poster",
+    "posters",
+    "cover",
+    "covers",
+    "collage",
+    "collages",
+    "design",
+    "designs",
+    "graphic",
+    "graphics",
+    "logo",
+    "logos",
+    "icon",
+    "icons",
+    "symbol",
+    "symbols",
+    "emblem",
+    "emblems",
+    "badge",
+    "badges",
+    "stamp",
+    "stamps",
+    "img",
+    "video",
+    "videos",
+    "clip",
+    "clips",
+    "film",
+    "films",
+    "movie",
+    "movies",
+    "meme",
+    "grand",
+    "sticker",
+    "stickers",
+    "banner",
+    "banners",
+    "billboard",
+    "billboards",
+    "label",
+    "labels",
+    "scene",
+    "art",
+    "png",
+    "jpg",
+    "jpeg",
+    "gif",
+    "www",
+    "com",
+    "net",
+    "org",
+    "http",
+    "https",
+    "html",
+    "css",
+    "js",
+    "php",
+    "scene",
+    "view",
+    "m3",
+]
 
-        >>> # You can replace the checkpoint id with "PixArt-alpha/PixArt-Sigma-XL-2-512-MS" too.
-        >>> pipe = PixArtSigmaPipeline.from_pretrained(
-        ...     "PixArt-alpha/PixArt-Sigma-XL-2-1024-MS", torch_dtype=torch.float16
-        ... )
-        >>> # Enable memory optimizations.
-        >>> # pipe.enable_model_cpu_offload()
 
-        >>> prompt = "A small cactus with a happy face in the Sahara desert."
-        >>> image = pipe(prompt).images[0]
-        ```
-"""
+def download_nltk_data():
+    try:
+        nltk.data.find("tokenizers/punkt")
+    except LookupError:
+        nltk.download("punkt")
+
+    try:
+        nltk.data.find("taggers/averaged_perceptron_tagger")
+    except LookupError:
+        nltk.download("averaged_perceptron_tagger")
 
 
-# Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.retrieve_timesteps
-def retrieve_timesteps(
-    scheduler,
-    num_inference_steps: Optional[int] = None,
-    device: Optional[Union[str, torch.device]] = None,
-    timesteps: Optional[List[int]] = None,
-    **kwargs,
+def grabcut(
+    image,
+    attention_maps,
+    image_size,
+    sure_fg_threshold,
+    maybe_fg_threshold,
+    maybe_bg_threshold,
 ):
-    """
-    Calls the scheduler's `set_timesteps` method and retrieves timesteps from the scheduler after the call. Handles
-    custom timesteps. Any kwargs will be supplied to `scheduler.set_timesteps`.
+    sure_fg_full_mask = torch.zeros((image_size, image_size), dtype=torch.uint8)
+    maybe_fg_full_mask = torch.zeros((image_size, image_size), dtype=torch.uint8)
+    maybe_bg_full_mask = torch.zeros((image_size, image_size), dtype=torch.uint8)
+    sure_bg_full_mask = torch.zeros((image_size, image_size), dtype=torch.uint8)
+    for attention_map in attention_maps:
+        attention_map = F.interpolate(
+            attention_map[None, None, :, :].float(),
+            size=(image_size, image_size),
+            mode="bicubic",
+        )[0, 0]
 
-    Args:
-        scheduler (`SchedulerMixin`):
-            The scheduler to get timesteps from.
-        num_inference_steps (`int`):
-            The number of diffusion steps used when generating samples with a pre-trained model. If used, `timesteps`
-            must be `None`.
-        device (`str` or `torch.device`, *optional*):
-            The device to which the timesteps should be moved to. If `None`, the timesteps are not moved.
-        timesteps (`List[int]`, *optional*):
-                Custom timesteps used to support arbitrary spacing between timesteps. If `None`, then the default
-                timestep spacing strategy of the scheduler is used. If `timesteps` is passed, `num_inference_steps`
-                must be `None`.
+        threshold_sure_fg = sure_fg_threshold * attention_map.max()
+        threshold_maybe_fg = maybe_fg_threshold * attention_map.max()
+        threshold_maybe_bg = maybe_bg_threshold * attention_map.max()
+        sure_fg_full_mask += (attention_map > threshold_sure_fg).to(torch.uint8)
+        maybe_fg_full_mask += (
+            (attention_map > threshold_maybe_fg) & (attention_map <= threshold_sure_fg)
+        ).to(torch.uint8)
+        maybe_bg_full_mask += (
+            (attention_map > threshold_maybe_bg) & (attention_map <= threshold_maybe_fg)
+        ).to(torch.uint8)
+        sure_bg_full_mask += (attention_map <= threshold_maybe_bg).to(torch.uint8)
 
-    Returns:
-        `Tuple[torch.Tensor, int]`: A tuple where the first element is the timestep schedule from the scheduler and the
-        second element is the number of inference steps.
-    """
-    if timesteps is not None:
-        accepts_timesteps = "timesteps" in set(
-            inspect.signature(scheduler.set_timesteps).parameters.keys()
+    mask = torch.zeros((image_size, image_size), dtype=torch.uint8)
+    mask = torch.where(sure_bg_full_mask.bool(), cv2.GC_BGD, mask)
+    mask = torch.where(maybe_bg_full_mask.bool(), cv2.GC_PR_BGD, mask)
+    mask = torch.where(maybe_fg_full_mask.bool(), cv2.GC_PR_FGD, mask)
+    mask = torch.where(sure_fg_full_mask.bool(), cv2.GC_FGD, mask)
+
+    bgdModel = np.zeros((1, 65), np.float64)
+    fgdModel = np.zeros((1, 65), np.float64)
+    mask = mask.numpy().astype(np.uint8)
+    try:
+        mask, bgdModel, fgdModel = cv2.grabCut(
+            img=np.array(image),
+            mask=mask,
+            rect=None,
+            bgdModel=bgdModel,
+            fgdModel=fgdModel,
+            iterCount=5,
+            mode=cv2.GC_INIT_WITH_MASK,
         )
-        if not accepts_timesteps:
-            raise ValueError(
-                f"The current scheduler class {scheduler.__class__}'s `set_timesteps` does not support custom"
-                f" timestep schedules. Please check whether you are using the correct scheduler."
+    except Exception as err:
+        logger.warning(
+            f"Grabcut failed, using default mask and mode={cv2.GC_INIT_WITH_MASK}: %s",
+            err,
+            exc_info=True,
+        )
+        mask = np.zeros_like(mask)
+        center_rect = (128, 128, 384, 384)
+        mask, bgdModel, fgdModel = cv2.grabCut(
+            np.array(image),
+            mask,
+            center_rect,
+            bgdModel,
+            fgdModel,
+            5,
+            cv2.GC_INIT_WITH_RECT,
+        )
+
+    alpha = np.where((mask == 2) | (mask == 0), 0, 1).astype("uint8")
+
+    return alpha
+
+
+def compute_trimap(
+    attention_maps, image_size, sure_fg_threshold, maybe_bg_threshold
+) -> torch.Tensor:
+    def _compute_trimap(
+        attention_maps,
+        image_size: int,
+        sure_fg_threshold: float,
+        maybe_bg_threshold: float,
+    ):
+        breakpoint()
+
+        tensor_size = (image_size, image_size)
+        sure_fg_full_mask = torch.zeros(tensor_size, dtype=torch.uint8)
+        unsure = torch.zeros(tensor_size, dtype=torch.uint8)
+        sure_bg_full_mask = torch.zeros(tensor_size, dtype=torch.uint8)
+        for attention_map in attention_maps:
+            attention_map = attention_map[None, None, :, :].float()
+
+            breakpoint()
+            attention_map = F.interpolate(
+                attention_map, size=tensor_size, mode="bicubic"
+            )[0, 0]
+
+            threshold_sure_fg = sure_fg_threshold * attention_map.max()
+            threshold_maybe_bg = maybe_bg_threshold * attention_map.max()
+            sure_fg_full_mask += attention_map > threshold_sure_fg
+            unsure += (attention_map > maybe_bg_threshold) & (
+                attention_map <= threshold_sure_fg
             )
-        scheduler.set_timesteps(timesteps=timesteps, device=device, **kwargs)
-        timesteps = scheduler.timesteps
-        num_inference_steps = len(timesteps)
+            sure_bg_full_mask += attention_map <= threshold_maybe_bg
+
+        mask = torch.zeros(tensor_size, dtype=torch.uint8)
+        mask = torch.where(sure_bg_full_mask, 255, mask)
+        mask = torch.where(unsure, 128, mask)
+        mask = torch.where(sure_fg_full_mask, 0, mask)
+
+        return mask
+
+    if isinstance(attention_maps, list):
+        masks = [
+            _compute_trimap(
+                attention_map, image_size, sure_fg_threshold, maybe_bg_threshold
+            )
+            for attention_map in attention_maps
+        ]
+        return torch.stack(masks)
     else:
-        scheduler.set_timesteps(num_inference_steps, device=device, **kwargs)
-        timesteps = scheduler.timesteps
-    return timesteps, num_inference_steps
+        return _compute_trimap(
+            attention_maps, image_size, sure_fg_threshold, maybe_bg_threshold
+        )[None]
 
 
-class PixArtSigmaPipeline(DiffusionPipeline):
-    r"""
-    Pipeline for text-to-image generation using PixArt-Sigma.
-    """
+def combine_to_rgba_image(
+    rgb_image: PilImage, alpha_image: Union[torch.Tensor, np.ndarray]
+) -> PilImage:
+    alpha_image *= 255
+    if isinstance(alpha_image, torch.Tensor):
+        alpha_image = alpha_image.detach().clone().cpu().numpy()
+        alpha_image = alpha_image.clip(0, 255).astype(np.uint8)
 
-    bad_punct_regex = re.compile(
-        r"["
-        + "#®•©™&@·º½¾¿¡§~"
-        + r"\)"
-        + r"\("
-        + r"\]"
-        + r"\["
-        + r"\}"
-        + r"\{"
-        + r"\|"
-        + "\\"
-        + r"\/"
-        + r"\*"
-        + r"]{1,}"
-    )  # noqa
+    alpha_image_pl = Image.fromarray(alpha_image, mode="L")
+    rgb_image = rgb_image.copy()
+    rgb_image.putalpha(alpha_image_pl)
+    return rgb_image
 
-    _optional_components = ["tokenizer", "text_encoder"]
-    model_cpu_offload_seq = "text_encoder->transformer->vae"
 
+@dataclass
+class ParsedNounts(object):
+    nouns: List[str]
+    nouns_indexes: List[List[int]]
+    num_prompt_tokens: int
+
+
+class AlfiePixArtSigmaPipeline(PixArtSigmaPipeline):
     def __init__(
         self,
         tokenizer: T5Tokenizer,
         text_encoder: T5EncoderModel,
         vae: AutoencoderKL,
-        transformer: Transformer2DModel,
-        scheduler: DPMSolverMultistepScheduler,
+        transformer: PixArtTransformer2DModel,
+        scheduler: KarrasDiffusionSchedulers,
     ):
-        super().__init__()
+        super().__init__(tokenizer, text_encoder, vae, transformer, scheduler)
 
-        self.register_modules(
-            tokenizer=tokenizer,
-            text_encoder=text_encoder,
-            vae=vae,
+    @classmethod
+    def from_alfie_setting(
+        cls,
+        image_size: int,
+        scheduler_name: str,
+        torch_dtype: torch.dtype,
+        pipeline_id: str = "PixArt-alpha/PixArt-Sigma-XL-2-1024-MS",
+        denoiser_id: Optional[str] = None,
+    ) -> "AlfiePixArtSigmaPipeline":
+        download_nltk_data()
+
+        if image_size == 256:
+            _denoiser_id = "PixArt-alpha/PixArt-Sigma-XL-2-256x256"
+        elif image_size == 512:
+            _denoiser_id = "PixArt-alpha/PixArt-Sigma-XL-2-512-MS"
+        else:
+            raise ValueError(f"Invalid image size: {image_size}")
+
+        if denoiser_id is not None and denoiser_id != _denoiser_id:
+            raise ValueError(
+                f"The image size (= {image_size}) and "
+                f"the specified model ID (= {denoiser_id}) are different."
+            )
+
+        transformer = AlfinePixArtTransformer2DModel.from_pretrained(
+            denoiser_id,
+            subfolder="transformer",
+            use_safetensors=True,
+            torch_dtype=torch_dtype,
+        )
+
+        dpm_scheduler = DPMSolverMultistepScheduler.from_pretrained(
+            pipeline_id, subfolder="scheduler"
+        )
+        if scheduler_name == "euler":
+            eul_scheduler = EulerDiscreteScheduler.from_config(
+                config=dpm_scheduler.config,
+            )
+        elif scheduler_name == "euler_ancestral":
+            eul_scheduler = EulerAncestralDiscreteScheduler.from_config(
+                config=dpm_scheduler.config,
+            )
+        else:
+            raise ValueError(f"Invalid scheduler: {scheduler_name}")
+
+        return cls.from_pretrained(
+            pipeline_id,
             transformer=transformer,
-            scheduler=scheduler,
+            scheduler=eul_scheduler,
+            torch_dtype=torch_dtype,
         )
 
-        self.vae_scale_factor = 2 ** (len(self.vae.config.block_out_channels) - 1)
-        self.image_processor = PixArtImageProcessor(
-            vae_scale_factor=self.vae_scale_factor
-        )
+    def create_generation_mask(
+        self,
+        latent_h: int,
+        latent_w: int,
+        mask_type: str,
+        dtype: torch.dtype,
+        beta: float = 0.00,
+        border_h: Optional[int] = None,
+        border_w: Optional[int] = None,
+    ) -> torch.Tensor:
+        border_size_h = latent_h // 4 if border_h is None else border_h
+        border_size_w = latent_w // 4 if border_w is None else border_w
+        mask = torch.full((latent_h, latent_w), fill_value=beta).to(dtype)
+        if mask_type == "center":
+            mask[border_size_h:-border_size_h, border_size_w:-border_size_w] = 1
+        elif mask_type == "bottom":
+            mask[border_size_h * 2 :, border_size_w:-border_size_w] = 1
+        elif mask_type == "top":
+            mask[: -border_size_h * 2, border_size_w:-border_size_w] = 1
+        elif mask_type == "right":
+            mask[border_size_h:-border_size_h, border_size_w * 2 :] = 1
+        elif mask_type == "left":
+            mask[border_size_h:-border_size_h, : -border_size_w * 2] = 1
+        elif mask_type == "top_right":
+            mask[: -border_size_h * 2, border_size_w * 2 :] = 1
+        elif mask_type == "top_left":
+            mask[: -border_size_h * 2, : -border_size_w * 2] = 1
+        elif mask_type == "bottom_right":
+            mask[border_size_h * 2 :, border_size_w * 2 :] = 1
+        elif mask_type == "bottom_left":
+            mask[border_size_h * 2 :, : -border_size_w * 2] = 1
+        elif mask_type == "full":
+            mask = torch.ones((latent_h, latent_w)).to(dtype)
+        else:
+            raise ValueError(f"Invalid mask type: {mask_type}")
+        return mask
 
-    # Copied from diffusers.pipelines.pixart_alpha.pipeline_pixart_alpha.PixArtAlphaPipeline.encode_prompt
     def encode_prompt(
         self,
         prompt: Union[str, List[str]],
@@ -379,338 +586,9 @@ class PixArtSigmaPipeline(DiffusionPipeline):
             negative_prompt_attention_mask,
         )
 
-    # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.StableDiffusionPipeline.prepare_extra_step_kwargs
-    def prepare_extra_step_kwargs(self, generator, eta):
-        # prepare extra kwargs for the scheduler step, since not all schedulers have the same signature
-        # eta (η) is only used with the DDIMScheduler, it will be ignored for other schedulers.
-        # eta corresponds to η in DDIM paper: https://arxiv.org/abs/2010.02502
-        # and should be between [0, 1]
-
-        accepts_eta = "eta" in set(
-            inspect.signature(self.scheduler.step).parameters.keys()
-        )
-        extra_step_kwargs = {}
-        if accepts_eta:
-            extra_step_kwargs["eta"] = eta
-
-        # check if the scheduler accepts generator
-        accepts_generator = "generator" in set(
-            inspect.signature(self.scheduler.step).parameters.keys()
-        )
-        if accepts_generator:
-            extra_step_kwargs["generator"] = generator
-        return extra_step_kwargs
-
-    # Copied from diffusers.pipelines.pixart_alpha.pipeline_pixart_alpha.PixArtAlphaPipeline.check_inputs
-    def check_inputs(
-        self,
-        prompt,
-        height,
-        width,
-        negative_prompt,
-        callback_steps,
-        prompt_embeds=None,
-        negative_prompt_embeds=None,
-        prompt_attention_mask=None,
-        negative_prompt_attention_mask=None,
-    ):
-        if height % 8 != 0 or width % 8 != 0:
-            raise ValueError(
-                f"`height` and `width` have to be divisible by 8 but are {height} and {width}."
-            )
-
-        if (callback_steps is None) or (
-            callback_steps is not None
-            and (not isinstance(callback_steps, int) or callback_steps <= 0)
-        ):
-            raise ValueError(
-                f"`callback_steps` has to be a positive integer but is {callback_steps} of type"
-                f" {type(callback_steps)}."
-            )
-
-        if prompt is not None and prompt_embeds is not None:
-            raise ValueError(
-                f"Cannot forward both `prompt`: {prompt} and `prompt_embeds`: {prompt_embeds}. Please make sure to"
-                " only forward one of the two."
-            )
-        elif prompt is None and prompt_embeds is None:
-            raise ValueError(
-                "Provide either `prompt` or `prompt_embeds`. Cannot leave both `prompt` and `prompt_embeds` undefined."
-            )
-        elif prompt is not None and (
-            not isinstance(prompt, str) and not isinstance(prompt, list)
-        ):
-            raise ValueError(
-                f"`prompt` has to be of type `str` or `list` but is {type(prompt)}"
-            )
-
-        if prompt is not None and negative_prompt_embeds is not None:
-            raise ValueError(
-                f"Cannot forward both `prompt`: {prompt} and `negative_prompt_embeds`:"
-                f" {negative_prompt_embeds}. Please make sure to only forward one of the two."
-            )
-
-        if negative_prompt is not None and negative_prompt_embeds is not None:
-            raise ValueError(
-                f"Cannot forward both `negative_prompt`: {negative_prompt} and `negative_prompt_embeds`:"
-                f" {negative_prompt_embeds}. Please make sure to only forward one of the two."
-            )
-
-        if prompt_embeds is not None and prompt_attention_mask is None:
-            raise ValueError(
-                "Must provide `prompt_attention_mask` when specifying `prompt_embeds`."
-            )
-
-        if (
-            negative_prompt_embeds is not None
-            and negative_prompt_attention_mask is None
-        ):
-            raise ValueError(
-                "Must provide `negative_prompt_attention_mask` when specifying `negative_prompt_embeds`."
-            )
-
-        if prompt_embeds is not None and negative_prompt_embeds is not None:
-            if prompt_embeds.shape != negative_prompt_embeds.shape:
-                raise ValueError(
-                    "`prompt_embeds` and `negative_prompt_embeds` must have the same shape when passed directly, but"
-                    f" got: `prompt_embeds` {prompt_embeds.shape} != `negative_prompt_embeds`"
-                    f" {negative_prompt_embeds.shape}."
-                )
-            if prompt_attention_mask.shape != negative_prompt_attention_mask.shape:
-                raise ValueError(
-                    "`prompt_attention_mask` and `negative_prompt_attention_mask` must have the same shape when passed directly, but"
-                    f" got: `prompt_attention_mask` {prompt_attention_mask.shape} != `negative_prompt_attention_mask`"
-                    f" {negative_prompt_attention_mask.shape}."
-                )
-
-    # Copied from diffusers.pipelines.deepfloyd_if.pipeline_if.IFPipeline._text_preprocessing
-    def _text_preprocessing(self, text, clean_caption=False):
-        if clean_caption and not is_bs4_available():
-            logger.warning(
-                BACKENDS_MAPPING["bs4"][-1].format("Setting `clean_caption=True`")
-            )
-            logger.warning("Setting `clean_caption` to False...")
-            clean_caption = False
-
-        if clean_caption and not is_ftfy_available():
-            logger.warning(
-                BACKENDS_MAPPING["ftfy"][-1].format("Setting `clean_caption=True`")
-            )
-            logger.warning("Setting `clean_caption` to False...")
-            clean_caption = False
-
-        if not isinstance(text, (tuple, list)):
-            text = [text]
-
-        def process(text: str):
-            if clean_caption:
-                text = self._clean_caption(text)
-                text = self._clean_caption(text)
-            else:
-                text = text.lower().strip()
-            return text
-
-        return [process(t) for t in text]
-
-    # Copied from diffusers.pipelines.deepfloyd_if.pipeline_if.IFPipeline._clean_caption
-    def _clean_caption(self, caption):
-        caption = str(caption)
-        caption = ul.unquote_plus(caption)
-        caption = caption.strip().lower()
-        caption = re.sub("<person>", "person", caption)
-        # urls:
-        caption = re.sub(
-            r"\b((?:https?:(?:\/{1,3}|[a-zA-Z0-9%])|[a-zA-Z0-9.\-]+[.](?:com|co|ru|net|org|edu|gov|it)[\w/-]*\b\/?(?!@)))",
-            # noqa
-            "",
-            caption,
-        )  # regex for urls
-        caption = re.sub(
-            r"\b((?:www:(?:\/{1,3}|[a-zA-Z0-9%])|[a-zA-Z0-9.\-]+[.](?:com|co|ru|net|org|edu|gov|it)[\w/-]*\b\/?(?!@)))",
-            # noqa
-            "",
-            caption,
-        )  # regex for urls
-        # html:
-        caption = BeautifulSoup(caption, features="html.parser").text
-
-        # @<nickname>
-        caption = re.sub(r"@[\w\d]+\b", "", caption)
-
-        # 31C0—31EF CJK Strokes
-        # 31F0—31FF Katakana Phonetic Extensions
-        # 3200—32FF Enclosed CJK Letters and Months
-        # 3300—33FF CJK Compatibility
-        # 3400—4DBF CJK Unified Ideographs Extension A
-        # 4DC0—4DFF Yijing Hexagram Symbols
-        # 4E00—9FFF CJK Unified Ideographs
-        caption = re.sub(r"[\u31c0-\u31ef]+", "", caption)
-        caption = re.sub(r"[\u31f0-\u31ff]+", "", caption)
-        caption = re.sub(r"[\u3200-\u32ff]+", "", caption)
-        caption = re.sub(r"[\u3300-\u33ff]+", "", caption)
-        caption = re.sub(r"[\u3400-\u4dbf]+", "", caption)
-        caption = re.sub(r"[\u4dc0-\u4dff]+", "", caption)
-        caption = re.sub(r"[\u4e00-\u9fff]+", "", caption)
-        #######################################################
-
-        # все виды тире / all types of dash --> "-"
-        caption = re.sub(
-            r"[\u002D\u058A\u05BE\u1400\u1806\u2010-\u2015\u2E17\u2E1A\u2E3A\u2E3B\u2E40\u301C\u3030\u30A0\uFE31\uFE32\uFE58\uFE63\uFF0D]+",
-            # noqa
-            "-",
-            caption,
-        )
-
-        # кавычки к одному стандарту
-        caption = re.sub(r"[`´«»“”¨]", '"', caption)
-        caption = re.sub(r"[‘’]", "'", caption)
-
-        # &quot;
-        caption = re.sub(r"&quot;?", "", caption)
-        # &amp
-        caption = re.sub(r"&amp", "", caption)
-
-        # ip adresses:
-        caption = re.sub(r"\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}", " ", caption)
-
-        # article ids:
-        caption = re.sub(r"\d:\d\d\s+$", "", caption)
-
-        # \n
-        caption = re.sub(r"\\n", " ", caption)
-
-        # "#123"
-        caption = re.sub(r"#\d{1,3}\b", "", caption)
-        # "#12345.."
-        caption = re.sub(r"#\d{5,}\b", "", caption)
-        # "123456.."
-        caption = re.sub(r"\b\d{6,}\b", "", caption)
-        # filenames:
-        caption = re.sub(
-            r"[\S]+\.(?:png|jpg|jpeg|bmp|webp|eps|pdf|apk|mp4)", "", caption
-        )
-
-        #
-        caption = re.sub(r"[\"\']{2,}", r'"', caption)  # """AUSVERKAUFT"""
-        caption = re.sub(r"[\.]{2,}", r" ", caption)  # """AUSVERKAUFT"""
-
-        caption = re.sub(
-            self.bad_punct_regex, r" ", caption
-        )  # ***AUSVERKAUFT***, #AUSVERKAUFT
-        caption = re.sub(r"\s+\.\s+", r" ", caption)  # " . "
-
-        # this-is-my-cute-cat / this_is_my_cute_cat
-        regex2 = re.compile(r"(?:\-|\_)")
-        if len(re.findall(regex2, caption)) > 3:
-            caption = re.sub(regex2, " ", caption)
-
-        caption = ftfy.fix_text(caption)
-        caption = html.unescape(html.unescape(caption))
-
-        caption = re.sub(r"\b[a-zA-Z]{1,3}\d{3,15}\b", "", caption)  # jc6640
-        caption = re.sub(r"\b[a-zA-Z]+\d+[a-zA-Z]+\b", "", caption)  # jc6640vc
-        caption = re.sub(r"\b\d+[a-zA-Z]+\d+\b", "", caption)  # 6640vc231
-
-        caption = re.sub(r"(worldwide\s+)?(free\s+)?shipping", "", caption)
-        caption = re.sub(r"(free\s)?download(\sfree)?", "", caption)
-        caption = re.sub(r"\bclick\b\s(?:for|on)\s\w+", "", caption)
-        caption = re.sub(
-            r"\b(?:png|jpg|jpeg|bmp|webp|eps|pdf|apk|mp4)(\simage[s]?)?", "", caption
-        )
-        caption = re.sub(r"\bpage\s+\d+\b", "", caption)
-
-        caption = re.sub(
-            r"\b\d*[a-zA-Z]+\d+[a-zA-Z]+\d+[a-zA-Z\d]*\b", r" ", caption
-        )  # j2d1a2a...
-
-        caption = re.sub(r"\b\d+\.?\d*[xх×]\d+\.?\d*\b", "", caption)
-
-        caption = re.sub(r"\b\s+\:\s+", r": ", caption)
-        caption = re.sub(r"(\D[,\./])\b", r"\1 ", caption)
-        caption = re.sub(r"\s+", " ", caption)
-
-        caption.strip()
-
-        caption = re.sub(r"^[\"\']([\w\W]+)[\"\']$", r"\1", caption)
-        caption = re.sub(r"^[\'\_,\-\:;]", r"", caption)
-        caption = re.sub(r"[\'\_,\-\:\-\+]$", r"", caption)
-        caption = re.sub(r"^\.\S+$", "", caption)
-
-        return caption.strip()
-
-    # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.StableDiffusionPipeline.prepare_latents
-    def prepare_latents(
-        self,
-        batch_size,
-        num_channels_latents,
-        height,
-        width,
-        dtype,
-        device,
-        generator,
-        latents=None,
-    ):
-        shape = (
-            batch_size,
-            num_channels_latents,
-            int(height) // self.vae_scale_factor,
-            int(width) // self.vae_scale_factor,
-        )
-        if isinstance(generator, list) and len(generator) != batch_size:
-            raise ValueError(
-                f"You have passed a list of generators of length {len(generator)}, but requested an effective batch"
-                f" size of {batch_size}. Make sure the batch size matches the length of the generators."
-            )
-
-        if latents is None:
-            latents = randn_tensor(
-                shape, generator=generator, device=device, dtype=dtype
-            )
-        else:
-            latents = latents.to(device)
-
-        # scale the initial noise by the standard deviation required by the scheduler
-        latents = latents * self.scheduler.init_noise_sigma
-        return latents
-
-    @staticmethod
-    def create_generation_mask(
-        latent_h: int,
-        latent_w: int,
-        mask_type: str,
-        dtype: torch.dtype,
-        beta: float = 0.00,
-        border_h: int = None,
-        border_w: int = None,
-    ) -> torch.Tensor:
-        border_size_h = latent_h // 4 if border_h is None else border_h
-        border_size_w = latent_w // 4 if border_w is None else border_w
-        mask = torch.full((latent_h, latent_w), fill_value=beta).to(dtype)
-        if mask_type == "center":
-            mask[border_size_h:-border_size_h, border_size_w:-border_size_w] = 1
-        elif mask_type == "bottom":
-            mask[border_size_h * 2 :, border_size_w:-border_size_w] = 1
-        elif mask_type == "top":
-            mask[: -border_size_h * 2, border_size_w:-border_size_w] = 1
-        elif mask_type == "right":
-            mask[border_size_h:-border_size_h, border_size_w * 2 :] = 1
-        elif mask_type == "left":
-            mask[border_size_h:-border_size_h, : -border_size_w * 2] = 1
-        elif mask_type == "top_right":
-            mask[: -border_size_h * 2, border_size_w * 2 :] = 1
-        elif mask_type == "top_left":
-            mask[: -border_size_h * 2, : -border_size_w * 2] = 1
-        elif mask_type == "bottom_right":
-            mask[border_size_h * 2 :, border_size_w * 2 :] = 1
-        elif mask_type == "bottom_left":
-            mask[border_size_h * 2 :, : -border_size_w * 2] = 1
-        elif mask_type == "full":
-            mask = torch.ones((latent_h, latent_w)).to(dtype)
-        else:
-            raise ValueError(f"Invalid mask type: {mask_type}")
-        return mask
-
-    def parse_nouns(self, prompt: str, nouns_to_exclude=None):
+    def parse_nouns(
+        self, prompt: str, nouns_to_exclude: Optional[Sequence[str]] = None
+    ) -> ParsedNounts:
         if nouns_to_exclude is None:
             nouns_to_exclude = []
         prompt = prompt.lower()
@@ -734,9 +612,111 @@ class PixArtSigmaPipeline(DiffusionPipeline):
             for index in start_indexes:
                 merge_indexes += [i + index for i in range(0, len(search_tokens))]
             nouns_indexes.append(merge_indexes)
-        return nouns, nouns_indexes, num_prompt_tokens
 
-    @replace_example_docstring(EXAMPLE_DOC_STRING)
+        return ParsedNounts(
+            nouns=nouns,
+            nouns_indexes=nouns_indexes,
+            num_prompt_tokens=num_prompt_tokens,
+        )
+
+    def _postprocess_gradcut(
+        self,
+        rgb_image: PilImage,
+        heatmaps: AlfieHeatmaps,
+        image_size: int,
+        sure_fg_threshold: float,
+        maybe_fg_threshold: float,
+        maybe_bg_threshold: float,
+        k_alpha_intensity: float,
+    ) -> PilImage:
+        alpha_mask = grabcut(
+            image=rgb_image,
+            attention_maps=list(heatmaps["cross_heatmaps_fg_nouns"].values()),
+            image_size=image_size,
+            sure_fg_threshold=sure_fg_threshold,
+            maybe_fg_threshold=maybe_fg_threshold,
+            maybe_bg_threshold=maybe_bg_threshold,
+        )
+
+        alpha_mask_alfie = torch.tensor(alpha_mask)
+        alfa_hat = normalize_masks(
+            heatmaps["ff_heatmap"] + 1 * heatmaps["cross_heatmap_fg"]
+        )
+
+        alfa_hat = (alfa_hat + k_alpha_intensity * alfa_hat).clip(0, 1)
+        alpha_mask_alfie = torch.where(alpha_mask_alfie == 1, alfa_hat, 0.0)
+
+        return combine_to_rgba_image(rgb_image=rgb_image, alpha_image=alpha_mask_alfie)
+
+    def _postprocess_vit_matte(
+        self,
+        rgb_image: PilImage,
+        heatmaps: AlfieHeatmaps,
+        image_size: int,
+        model_id: str,
+        sure_fg_threshold: float,
+        maybe_bg_threshold: float,
+    ) -> PilImage:
+        from transformers import VitMatteForImageMatting, VitMatteImageProcessor
+
+        vit_matte_processor = VitMatteImageProcessor.from_pretrained(model_id)
+        vit_matte_model = VitMatteForImageMatting.from_pretrained(model_id)
+        vit_matte_model = vit_matte_model.eval()
+
+        trimap = compute_trimap(
+            attention_maps=[list(heatmaps["cross_heatmaps_fg_nouns"].values())],
+            image_size=image_size,
+            sure_fg_threshold=sure_fg_threshold,
+            maybe_bg_threshold=maybe_bg_threshold,
+        )
+
+        vit_matte_inputs = vit_matte_processor(
+            images=rgb_image, trimaps=trimap, return_tensors="pt"
+        )
+        vit_matte_inputs = vit_matte_inputs.to(self.device)
+        vit_matte_model = vit_matte_model.to(self.device)
+
+        with torch.no_grad():
+            alpha_mask = vit_matte_model(**vit_matte_inputs).alphas[0, 0]
+        alpha_mask = 1 - alpha_mask.detach().clone().cpu().numpy()
+
+        return combine_to_rgba_image(rgb_image=rgb_image, alpha_image=alpha_mask)
+
+    def postprocess(
+        self,
+        rgb_image: PilImage,
+        heatmaps: AlfieHeatmaps,
+        cutout_model: CutoutModel,
+        image_size: int,
+        sure_fg_threshold: float,
+        maybe_fg_threshold: float,
+        maybe_bg_threshold: float,
+        k_alpha_intensity: float,
+        vit_matte_model_id: str = "hustvl/vitmatte-base-composition-1k",
+    ) -> PilImage:
+        if cutout_model == "grabcut":
+            return self._postprocess_gradcut(
+                rgb_image=rgb_image,
+                heatmaps=heatmaps,
+                image_size=image_size,
+                sure_fg_threshold=sure_fg_threshold,
+                maybe_fg_threshold=maybe_fg_threshold,
+                maybe_bg_threshold=maybe_bg_threshold,
+                k_alpha_intensity=k_alpha_intensity,
+            )
+        elif cutout_model == "vit-matte":
+            return self._postprocess_vit_matte(
+                rgb_image=rgb_image,
+                heatmaps=heatmaps,
+                image_size=image_size,
+                model_id=vit_matte_model_id,
+                sure_fg_threshold=sure_fg_threshold,
+                maybe_bg_threshold=maybe_bg_threshold,
+            )
+        else:
+            raise ValueError(f"Invalid cutout model: {cutout_model}")
+
+    @torch.no_grad()
     def __call__(
         self,
         prompt: Union[str, List[str]] = None,
@@ -764,10 +744,10 @@ class PixArtSigmaPipeline(DiffusionPipeline):
         keep_cross_attention_maps: bool = True,
         keep_self_attention_maps: bool = True,
         centering: bool = False,
-        nouns_to_exclude=None,
+        nouns_to_exclude: Sequence[str] = NOUNS_TO_EXCLUDE,
         disable_tqdm: bool = False,
         **kwargs,
-    ) -> Union[ImagePipelineOutput, Tuple]:
+    ) -> Union[AlfieImagePipelineOutput, Tuple]:
         """
         Function invoked when calling the pipeline for generation.
 
@@ -883,8 +863,7 @@ class PixArtSigmaPipeline(DiffusionPipeline):
         else:
             batch_size = prompt_embeds.shape[0]
 
-        device = self._execution_device  # THIS AUTOMATICALLY CHANGES TO CPU
-        device = torch.device("cuda")
+        device = self._execution_device
 
         # here `guidance_scale` is defined analog to the guidance weight `w` of equation (2)
         # of the Imagen paper: https://arxiv.org/pdf/2205.11487.pdf . `guidance_scale = 1`
@@ -957,20 +936,17 @@ class PixArtSigmaPipeline(DiffusionPipeline):
             border_w=latent_w // 8,
         )
 
-        processor = AttnProcessor2_0(
+        processor = AlfieAttnProcessor2_0(
             keep_cross_attn_maps=keep_cross_attention_maps,
             keep_self_attn_maps=keep_self_attention_maps,
             tokenizer=self.tokenizer,
         )
         self.transformer.set_attn_processor(processor)
-        nouns, nouns_indexes, num_prompt_tokens = self.parse_nouns(
-            prompt_clean, nouns_to_exclude=nouns_to_exclude
-        )
-        if len(nouns_indexes) == 0:
-            logger.warning(
+        parsed_nouns = self.parse_nouns(prompt_clean, nouns_to_exclude=nouns_to_exclude)
+        if len(parsed_nouns.nouns_indexes) == 0:
+            raise ValueError(
                 f"No nouns found in the prompt {prompt_clean}. Returning None and skipping the generation."
             )
-            return None, None, None
 
         self.text_encoder = self.text_encoder.to("cpu")
         # 7. Denoising loop
@@ -980,7 +956,7 @@ class PixArtSigmaPipeline(DiffusionPipeline):
 
         self.set_progress_bar_config(disable=disable_tqdm)
         with self.progress_bar(total=num_inference_steps) as progress_bar:
-            processor.num_prompt_tokens = num_prompt_tokens
+            processor.num_prompt_tokens = parsed_nouns.num_prompt_tokens
             for i, t in enumerate(timesteps):
                 processor.t = t
                 processor.l_iteration_ca = 0
@@ -1029,7 +1005,7 @@ class PixArtSigmaPipeline(DiffusionPipeline):
                         encoder_attention_mask=prompt_attention_mask,
                         timestep=current_timestep,
                         added_cond_kwargs=added_cond_kwargs,
-                        return_dict=False,
+                        return_dict=return_dict,
                     )[0]
 
                     # perform guidance
@@ -1097,7 +1073,7 @@ class PixArtSigmaPipeline(DiffusionPipeline):
         self_heatmap_fg = processor.compute_global_self_heat_map()
         cross_heatmap_fg = processor.compute_global_cross_heat_map(prompt=prompt_clean)
         cross_heatmaps_fg = []
-        for noun in nouns:
+        for noun in parsed_nouns.nouns:
             cross_heatmap_noun = cross_heatmap_fg.compute_word_heat_map(noun)
             self_heatmap_noun = self_heatmap_fg.compute_guided_heat_map(
                 normalize_masks(cross_heatmap_noun.heatmap)
@@ -1129,4 +1105,4 @@ class PixArtSigmaPipeline(DiffusionPipeline):
         if not return_dict:
             return image, heatmaps
 
-        return ImagePipelineOutput(images=image)
+        return AlfieImagePipelineOutput(images=image, heatmaps=heatmaps)

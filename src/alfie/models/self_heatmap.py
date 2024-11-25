@@ -1,17 +1,17 @@
+import math
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import List, Dict, Tuple, Set, Union, Optional
-from tqdm import tqdm
+from typing import Dict, List, Optional, Set, Tuple, Union
 
-from matplotlib import pyplot as plt
-import numpy as np
-import math
-import PIL.Image
 import cv2
+import numpy as np
+import PIL.Image
 import torch
 import torch.nn.functional as F
+from matplotlib import pyplot as plt
+from tqdm import tqdm
 
-from .utils import auto_autocast
+from alfie.utils import auto_autocast
 
 __all__ = [
     "SelfGlobalHeatMap",
