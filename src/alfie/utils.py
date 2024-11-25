@@ -43,14 +43,14 @@ def auto_autocast(*args, **kwargs):
 
 def plot_mask_heat_map(
     im: PIL.Image.Image, heat_map: torch.Tensor, threshold: float = 0.4
-):
+) -> None:
     im = torch.from_numpy(np.array(im)).float() / 255
     mask = (heat_map.squeeze() > threshold).float()
     im = im * mask.unsqueeze(-1)
     plt.imshow(im)
 
 
-def normalize_masks(x: torch.Tensor):
+def normalize_masks(x: torch.Tensor) -> torch.Tensor:
     return (x - x.min()) / (x.max() - x.min())
 
 

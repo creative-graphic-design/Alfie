@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from typing import List, Optional
 
 import torch
@@ -5,35 +6,28 @@ import torch.nn.functional as F
 from diffusers.models.attention_processor import Attention, AttnProcessor2_0
 from diffusers.utils import deprecate
 from einops import rearrange
+from transformers.tokenization_utils import PreTrainedTokenizer
 
 from alfie.models.cross_heatmap import CrossGlobalHeatMap, CrossRawHeatMapCollection
 from alfie.models.self_heatmap import SelfGlobalHeatMap, SelfRawHeatMapCollection
 from alfie.utils import auto_autocast
 
 
+@dataclass
 class AlfieAttnProcessor2_0(AttnProcessor2_0):
-    def __init__(
-        self,
-        keep_cross_attn_maps: bool = True,
-        keep_self_attn_maps: bool = True,
-        tokenizer=None,
-    ) -> None:
-        super().__init__()
+    tokenizer: PreTrainedTokenizer
+    ca_maps_fg = CrossRawHeatMapCollection()
+    sa_maps_fg = SelfRawHeatMapCollection()
+    keep_ca_maps: bool = True
+    keep_sa_maps: bool = True
+    w: int = 32
+    h: int = 32
+    t: int = 0
+    l_iteration_ca: int = 0
+    l_iteration_sa: int = 0
+    num_prompt_tokens: Optional[int] = None
 
-        self.keep_cross_attn_maps = keep_cross_attn_maps
-        self.ca_maps_fg = CrossRawHeatMapCollection()
-        self.keep_self_attn_maps = keep_self_attn_maps
-        self.sa_maps_fg = SelfRawHeatMapCollection()
-
-        self.h, self.w = 32, 32
-        self.num_prompt_tokens = None
-        self.l_iteration_ca = 0
-        self.l_iteration_sa = 0
-        self.t = 0
-
-        self.tokenizer = tokenizer
-
-    def __call__(
+    def __call__(  # type: ignore[override]
         self,
         attn: Attention,
         hidden_states: torch.FloatTensor,
@@ -97,7 +91,7 @@ class AlfieAttnProcessor2_0(AttnProcessor2_0):
             query, key, attention_mask=attention_mask
         )
 
-        if attn.is_cross_attention and self.keep_cross_attn_maps and self.t > 20:
+        if attn.is_cross_attention and self.keep_ca_maps and self.t > 20:
             maps = rearrange(
                 attention_scores[:, :, : self.num_prompt_tokens],
                 "(b heads) (h w) l -> b heads l h w",
@@ -107,7 +101,7 @@ class AlfieAttnProcessor2_0(AttnProcessor2_0):
             maps_fg = maps[-1]  # filter out uncoditionals and background prompt
             self.ca_maps_fg.update(self.l_iteration_ca, maps_fg)
             self.l_iteration_ca += 1
-        if not attn.is_cross_attention and self.keep_self_attn_maps and self.t > 20:
+        if not attn.is_cross_attention and self.keep_sa_maps and self.t > 20:
             maps = rearrange(
                 attention_scores,
                 "(b n) (h1 w1) (h2 w2) -> b n (h1 w1) h2 w2",
@@ -171,8 +165,8 @@ class AlfieAttnProcessor2_0(AttnProcessor2_0):
 
             try:
                 maps = torch.stack(all_merges, dim=0)
-            except RuntimeError:
-                raise RuntimeError("No heat maps found.")
+            except RuntimeError as err:
+                raise RuntimeError("No heat maps found.") from err
 
             maps = maps.mean(dim=(0, 1))
             if normalize:
@@ -183,7 +177,7 @@ class AlfieAttnProcessor2_0(AttnProcessor2_0):
         return CrossGlobalHeatMap(self.tokenizer, prompt, maps)
 
     def compute_global_self_heat_map(
-        self, layers: List[int] = None, normalize: bool = False
+        self, num_layers: int, normalize: bool = False
     ) -> SelfGlobalHeatMap:
         """
         Compute the global heat map for each latent pixel, aggregating across time (inference steps) and space (different
@@ -197,7 +191,7 @@ class AlfieAttnProcessor2_0(AttnProcessor2_0):
             A heat map object for computing latent pixel-level heat maps.
         """
         heat_maps = self.sa_maps_fg
-        layers = set(range(28)) if layers is None else set(layers)
+        layers = set(range(num_layers))
 
         all_merges = []
 
@@ -212,13 +206,13 @@ class AlfieAttnProcessor2_0(AttnProcessor2_0):
                     )
             try:
                 maps = torch.stack(all_merges, dim=0)
-            except RuntimeError:
-                raise RuntimeError("No heat maps found.")
+            except RuntimeError as err:
+                raise RuntimeError("No heat maps found.") from err
 
             maps = maps.mean(dim=(0, 1))
+
             if normalize:
-                maps = maps / (
-                    maps.sum(0, keepdim=True) + 1e-6
-                )  # drop out [SOS] and [PAD] for proper probabilities
+                # drop out [SOS] and [PAD] for proper probabilities
+                maps = maps / (maps.sum(0, keepdim=True) + 1e-6)
 
         return SelfGlobalHeatMap(maps, maps.shape[0])

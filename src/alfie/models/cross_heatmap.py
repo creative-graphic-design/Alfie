@@ -1,13 +1,15 @@
+import logging
 from collections import defaultdict
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import Any, Dict, Iterable, Set, Tuple
+from typing import Any, Dict, Iterable, Optional, Set, Tuple
 
-import numpy as np
 import spacy.tokens
 import torch
 import torch.nn.functional as F
-from matplotlib import pyplot as plt
+from einops import rearrange
+from PIL.Image import Image as PilImage
+from transformers.tokenization_utils import PreTrainedTokenizer
 
 from alfie.utils import auto_autocast, cached_nlp, compute_token_merge_indices
 
@@ -19,74 +21,25 @@ __all__ = [
     "CrossSyntacticHeatMapPair",
 ]
 
-
-def plot_overlay_heat_map(
-    im, heat_map, word=None, out_file=None, crop=None, color_normalize=True, ax=None
-):
-    # type: (PIL.Image.Image | np.ndarray, torch.Tensor, str, Path, int, bool, plt.Axes) -> None
-    if ax is None:
-        plt.clf()
-        plt.rcParams.update({"font.size": 24})
-        plt_ = plt
-    else:
-        plt_ = ax
-
-    with auto_autocast(dtype=torch.float32):
-        im = np.array(im)
-
-        if crop is not None:
-            heat_map = heat_map.squeeze()[crop:-crop, crop:-crop]
-            im = im[crop:-crop, crop:-crop]
-
-        if color_normalize:
-            plt_.imshow(heat_map.squeeze().cpu().numpy(), cmap="jet")
-        else:
-            heat_map = heat_map.clamp_(min=0, max=1)
-            plt_.imshow(
-                heat_map.squeeze().cpu().numpy(), cmap="jet", vmin=0.0, vmax=1.0
-            )
-
-        im = torch.from_numpy(im).float() / 255
-        im = torch.cat((im, (1 - heat_map.unsqueeze(-1))), dim=-1)
-        plt_.imshow(im)
-
-        if word is not None:
-            if ax is None:
-                plt.title(word)
-            else:
-                ax.set_title(word)
-
-        if out_file is not None:
-            plt.savefig(out_file)
+logger = logging.getLogger(__name__)
 
 
+@dataclass
 class CrossWordHeatMap:
-    def __init__(self, heatmap: torch.Tensor, word: str = None):
-        self.word = word
-        self.heatmap = heatmap
+    heatmap: torch.Tensor
+    word: str
 
     @property
     def value(self):
         return self.heatmap
 
-    def plot_overlay(
-        self, image, out_file=None, color_normalize=True, ax=None, **expand_kwargs
-    ):
-        # type: (PIL.Image.Image | np.ndarray, Path, bool, plt.Axes, Dict[str, Any]) -> None
-        plot_overlay_heat_map(
-            image,
-            self.expand_as(image, **expand_kwargs),
-            word=self.word,
-            out_file=out_file,
-            color_normalize=color_normalize,
-            ax=ax,
-        )
-
     def expand_as(
-        self, image, absolute=False, threshold=None, plot=False, **plot_kwargs
-    ):
-        # type: (PIL.Image.Image, bool, float, bool, Dict[str, Any]) -> torch.Tensor
-        im = self.heatmap.unsqueeze(0).unsqueeze(0)
+        self,
+        image: PilImage,
+        absolute: bool = False,
+        threshold: Optional[float] = None,
+    ) -> torch.Tensor:
+        im = rearrange(self.heatmap, "h w -> 1 1 h w")
         im = F.interpolate(
             im.float().detach(), size=(image.size[0], image.size[1]), mode="bicubic"
         )
@@ -97,10 +50,8 @@ class CrossWordHeatMap:
         if threshold:
             im = (im > threshold).float()
 
-        im = im.cpu().detach().squeeze()
-
-        if plot:
-            self.plot_overlay(image, **plot_kwargs)
+        # shape: (1, 1, h, w) -> (h, w)
+        im = im.clone().detach().cpu().squeeze()
 
         return im
 
@@ -120,13 +71,13 @@ class CrossParsedHeatMap:
     token: spacy.tokens.Token
 
 
+@dataclass(frozen=True)
 class CrossGlobalHeatMap:
-    def __init__(self, tokenizer: Any, prompt: str, heat_maps: torch.Tensor):
-        self.tokenizer = tokenizer
-        self.heat_maps = heat_maps
-        self.prompt = prompt
-        self.compute_word_heat_map = lru_cache(maxsize=50)(self.compute_word_heat_map)
+    tokenizer: PreTrainedTokenizer
+    prompt: str
+    heat_maps: torch.Tensor
 
+    @lru_cache(maxsize=50)
     def compute_word_heat_map(self, word: str) -> CrossWordHeatMap:
         merge_idxs = compute_token_merge_indices(self.tokenizer, self.prompt, word)
         return CrossWordHeatMap(self.heat_maps[merge_idxs].mean(0), word)
@@ -136,8 +87,8 @@ class CrossGlobalHeatMap:
             try:
                 heat_map = self.compute_word_heat_map(token.text)
                 yield CrossParsedHeatMap(heat_map, token)
-            except ValueError:
-                pass
+            except ValueError as err:
+                logger.warning(err)
 
     def dependency_relations(self) -> Iterable[CrossSyntacticHeatMapPair]:
         for token in cached_nlp(self.prompt):
@@ -153,8 +104,8 @@ class CrossGlobalHeatMap:
                         token.text,
                         token.dep_,
                     )
-                except ValueError:
-                    pass
+                except ValueError as err:
+                    logger.warning(err)
 
 
 RawHeatMapKey = Tuple[int]  # layer
@@ -187,6 +138,6 @@ class CrossRawHeatMapCollection:
     def __iter__(self):
         return iter(self.ids_to_heatmaps.items())
 
-    def clear(self):
+    def clear(self) -> None:
         self.ids_to_heatmaps.clear()
         self.ids_to_num_maps.clear()

@@ -862,8 +862,8 @@ class AlfiePixArtSigmaPipeline(PixArtSigmaPipeline):
         )
 
         processor = AlfieAttnProcessor2_0(
-            keep_cross_attn_maps=keep_cross_attention_maps,
-            keep_self_attn_maps=keep_self_attention_maps,
+            keep_ca_maps=keep_cross_attention_maps,
+            keep_sa_maps=keep_self_attention_maps,
             tokenizer=self.tokenizer,
         )
         self.transformer.set_attn_processor(processor)
@@ -995,36 +995,41 @@ class AlfiePixArtSigmaPipeline(PixArtSigmaPipeline):
         heatmaps = {"cross_heatmaps_fg_nouns": {}, "self_heatmaps_fg_nouns": {}}
 
         # Compute foreground maps
-        self_heatmap_fg = processor.compute_global_self_heat_map()
-        cross_heatmap_fg = processor.compute_global_cross_heat_map(prompt=prompt_clean)
-        cross_heatmaps_fg = []
+        sa_heatmap_fg = processor.compute_global_self_heat_map(
+            num_layers=len(self.transformer.transformer_blocks)
+        )
+        ca_heatmap_fg = processor.compute_global_cross_heat_map(
+            prompt=prompt_clean,
+        )
+
+        ca_heatmaps_fg = []
         for noun in parsed_nouns.nouns:
-            cross_heatmap_noun = cross_heatmap_fg.compute_word_heat_map(noun)
-            self_heatmap_noun = self_heatmap_fg.compute_guided_heat_map(
-                normalize_masks(cross_heatmap_noun.heatmap)
+            ca_heatmap_noun = ca_heatmap_fg.compute_word_heat_map(noun)
+            sa_heatmap_noun = sa_heatmap_fg.compute_guided_heat_map(
+                normalize_masks(ca_heatmap_noun.heatmap)
             )
             heatmaps["cross_heatmaps_fg_nouns"][noun] = normalize_masks(
-                cross_heatmap_noun.expand_as(image[0])
+                ca_heatmap_noun.expand_as(image[0])
             )
             heatmaps["self_heatmaps_fg_nouns"][noun] = normalize_masks(
-                self_heatmap_noun.expand_as(image[0])
+                sa_heatmap_noun.expand_as(image[0])
             )
-            cross_heatmaps_fg.append(cross_heatmap_noun)
+            ca_heatmaps_fg.append(ca_heatmap_noun)
 
         cross_heatmaps_for_ff = normalize_masks(
-            torch.stack([ca.heatmap for ca in cross_heatmaps_fg], dim=0).mean(dim=0)
+            torch.stack([ca.heatmap for ca in ca_heatmaps_fg], dim=0).mean(dim=0)
         )
         ff = normalize_masks(
-            self_heatmap_fg.compute_guided_heat_map(cross_heatmaps_for_ff).expand_as(
+            sa_heatmap_fg.compute_guided_heat_map(cross_heatmaps_for_ff).expand_as(
                 image[0]
             )
         )
-        cross_heatmaps_fg = normalize_masks(
-            torch.stack(
-                [ca.expand_as(image[0]) for ca in cross_heatmaps_fg], dim=0
-            ).mean(dim=0)
+        ca_heatmaps_fg = normalize_masks(
+            torch.stack([ca.expand_as(image[0]) for ca in ca_heatmaps_fg], dim=0).mean(
+                dim=0
+            )
         )
-        heatmaps["cross_heatmap_fg"] = cross_heatmaps_fg
+        heatmaps["cross_heatmap_fg"] = ca_heatmaps_fg
         heatmaps["ff_heatmap"] = ff
 
         if not return_dict:
