@@ -101,10 +101,6 @@ def pipeline_id() -> str:
         "vit-matte",
     ),
 )
-# @pytest.mark.parametrize(
-#     argnames="suffix",
-#     argvalues=("", " on a white background"),
-# )
 @pytest.mark.parametrize(
     argnames="return_dict",
     argvalues=(
@@ -125,7 +121,6 @@ def test_pipeline_pixart_sigma(
     maybe_fg_threshold: float,
     maybe_bg_threshold: float,
     num_images: int,
-    # suffix: str,
     seed: int,
     vit_matte_model_id: str,
     pipeline_id: str,
