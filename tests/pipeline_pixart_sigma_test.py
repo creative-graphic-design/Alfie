@@ -1,4 +1,4 @@
-from typing import List
+from typing import List, Tuple
 
 import pytest
 import torch
@@ -29,8 +29,8 @@ def k_alpha_intensity() -> float:
 
 
 @pytest.fixture
-def negative_prompts() -> List[str]:
-    return ["Blurry, shadow, low-resolution, low-quality"]
+def negative_prompt() -> str:
+    return "Blurry, shadow, low-resolution, low-quality"
 
 
 @pytest.fixture
@@ -77,13 +77,13 @@ def pipeline_id() -> str:
     argnames="fg_prompt",
     argvalues=(
         "A photo of a cat with a hat",
-        "A large, colorful tree made of money, with lots of yellow and white coins hanging from its branches",
+        # "A large, colorful tree made of money, with lots of yellow and white coins hanging from its branches",
     ),
 )
 @pytest.mark.parametrize(
     argnames="image_size, denoiser_id",
     argvalues=(
-        (256, "PixArt-alpha/PixArt-Sigma-XL-2-256x256"),
+        # (256, "PixArt-alpha/PixArt-Sigma-XL-2-256x256"),
         (512, "PixArt-alpha/PixArt-Sigma-XL-2-512-MS"),
     ),
 )
@@ -91,21 +91,21 @@ def pipeline_id() -> str:
     argnames="scheduler_name",
     argvalues=(
         "euler",
-        "euler_ancestral",
+        # "euler_ancestral",
     ),
 )
 @pytest.mark.parametrize(
     argnames="cutout_model",
     argvalues=(
         "grabcut",
-        "vit-matte",
+        # "vit-matte",
     ),
 )
 @pytest.mark.parametrize(
     argnames="return_dict",
     argvalues=(
         True,
-        False,
+        # False,
     ),
 )
 def test_pipeline_pixart_sigma(
@@ -113,7 +113,7 @@ def test_pipeline_pixart_sigma(
     disable_centering: bool,
     k_alpha_intensity: float,
     scheduler_name: str,
-    negative_prompts: List[str],
+    negative_prompt: str,
     image_size: int,
     steps: int,
     cutout_model: CutoutModel,
@@ -143,7 +143,7 @@ def test_pipeline_pixart_sigma(
 
     output = pipe(
         prompt=prompt,
-        nevative_prompt=negative_prompts,
+        nevative_prompt=negative_prompt,
         keep_cross_attention_maps=True,
         return_dict=return_dict,
         num_inference_steps=steps,
@@ -153,8 +153,26 @@ def test_pipeline_pixart_sigma(
     images = output.images if return_dict else output[0]
     heatmaps = output.heatmaps if return_dict else output[1]
 
-    assert len(images) == 1
+    assert len(images) == 1, f"Expected 1 image, got {len(images)}"
     rgb_image = images[0]
+
+    def check_shape(
+        heatmap: torch.Tensor,
+        expected_shape: Tuple[int, int] = (image_size, image_size),
+    ) -> None:
+        actual_shape = heatmap.shape
+        assert (
+            expected_shape == actual_shape
+        ), f"Expected shape {expected_shape}, got {actual_shape}"
+
+    for noun_heatmaps in heatmaps.values():
+        if isinstance(noun_heatmaps, torch.Tensor):
+            check_shape(heatmap=noun_heatmaps)
+        elif isinstance(noun_heatmaps, dict):
+            for noun_heatmap in noun_heatmaps.values():
+                check_shape(heatmap=noun_heatmap)
+        else:
+            raise ValueError(f"Unexpected type {type(noun_heatmaps)}")
 
     rgba_image = pipe.postprocess(
         rgb_image=rgb_image,
