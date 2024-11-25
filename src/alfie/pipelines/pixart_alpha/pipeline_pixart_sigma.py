@@ -1,9 +1,12 @@
-from typing import Callable, List, Optional, Sequence, Tuple, Union
+from dataclasses import dataclass
+from typing import Callable, List, Literal, Optional, Sequence, Tuple, Union
 
+import cv2
 import nltk
+import numpy as np
 import torch
+import torch.nn.functional as F
 from diffusers.models import AutoencoderKL, PixArtTransformer2DModel
-from diffusers.pipelines.pipeline_utils import ImagePipelineOutput
 from diffusers.pipelines.pixart_alpha.pipeline_pixart_alpha import (
     ASPECT_RATIO_256_BIN,
     ASPECT_RATIO_512_BIN,
@@ -20,12 +23,18 @@ from diffusers.schedulers import (
     KarrasDiffusionSchedulers,
 )
 from diffusers.utils import deprecate, logging
+from PIL import Image
+from PIL.Image import Image as PilImage
 from transformers import T5EncoderModel, T5Tokenizer
 
 from alfie.models import AlfieAttnProcessor2_0, AlfinePixArtTransformer2DModel
 from alfie.utils import normalize_masks
 
+from .pipeline_output import AlfieHeatmaps, AlfieImagePipelineOutput
+
 logger = logging.get_logger(__name__)
+
+CutoutModel = Literal["grabcut", "vit-matte"]
 
 ASPECT_RATIO_2048_BIN = {
     "0.25": [1024.0, 4096.0],
@@ -163,6 +172,152 @@ def download_nltk_data():
         nltk.download("averaged_perceptron_tagger")
 
 
+def grabcut(
+    image,
+    attention_maps,
+    image_size,
+    sure_fg_threshold,
+    maybe_fg_threshold,
+    maybe_bg_threshold,
+):
+    sure_fg_full_mask = torch.zeros((image_size, image_size), dtype=torch.uint8)
+    maybe_fg_full_mask = torch.zeros((image_size, image_size), dtype=torch.uint8)
+    maybe_bg_full_mask = torch.zeros((image_size, image_size), dtype=torch.uint8)
+    sure_bg_full_mask = torch.zeros((image_size, image_size), dtype=torch.uint8)
+    for attention_map in attention_maps:
+        attention_map = F.interpolate(
+            attention_map[None, None, :, :].float(),
+            size=(image_size, image_size),
+            mode="bicubic",
+        )[0, 0]
+
+        threshold_sure_fg = sure_fg_threshold * attention_map.max()
+        threshold_maybe_fg = maybe_fg_threshold * attention_map.max()
+        threshold_maybe_bg = maybe_bg_threshold * attention_map.max()
+        sure_fg_full_mask += (attention_map > threshold_sure_fg).to(torch.uint8)
+        maybe_fg_full_mask += (
+            (attention_map > threshold_maybe_fg) & (attention_map <= threshold_sure_fg)
+        ).to(torch.uint8)
+        maybe_bg_full_mask += (
+            (attention_map > threshold_maybe_bg) & (attention_map <= threshold_maybe_fg)
+        ).to(torch.uint8)
+        sure_bg_full_mask += (attention_map <= threshold_maybe_bg).to(torch.uint8)
+
+    mask = torch.zeros((image_size, image_size), dtype=torch.uint8)
+    mask = torch.where(sure_bg_full_mask.bool(), cv2.GC_BGD, mask)
+    mask = torch.where(maybe_bg_full_mask.bool(), cv2.GC_PR_BGD, mask)
+    mask = torch.where(maybe_fg_full_mask.bool(), cv2.GC_PR_FGD, mask)
+    mask = torch.where(sure_fg_full_mask.bool(), cv2.GC_FGD, mask)
+
+    bgdModel = np.zeros((1, 65), np.float64)
+    fgdModel = np.zeros((1, 65), np.float64)
+    mask = mask.numpy().astype(np.uint8)
+    try:
+        mask, bgdModel, fgdModel = cv2.grabCut(
+            img=np.array(image),
+            mask=mask,
+            rect=None,
+            bgdModel=bgdModel,
+            fgdModel=fgdModel,
+            iterCount=5,
+            mode=cv2.GC_INIT_WITH_MASK,
+        )
+    except Exception as err:
+        logger.warning(
+            f"Grabcut failed, using default mask and mode={cv2.GC_INIT_WITH_MASK}: %s",
+            err,
+            exc_info=True,
+        )
+        mask = np.zeros_like(mask)
+        center_rect = (128, 128, 384, 384)
+        mask, bgdModel, fgdModel = cv2.grabCut(
+            np.array(image),
+            mask,
+            center_rect,
+            bgdModel,
+            fgdModel,
+            5,
+            cv2.GC_INIT_WITH_RECT,
+        )
+
+    alpha = np.where((mask == 2) | (mask == 0), 0, 1).astype("uint8")
+
+    return alpha
+
+
+def compute_trimap(
+    attention_maps, image_size, sure_fg_threshold, maybe_bg_threshold
+) -> torch.Tensor:
+    def _compute_trimap(
+        attention_maps,
+        image_size: int,
+        sure_fg_threshold: float,
+        maybe_bg_threshold: float,
+    ):
+        breakpoint()
+
+        tensor_size = (image_size, image_size)
+        sure_fg_full_mask = torch.zeros(tensor_size, dtype=torch.uint8)
+        unsure = torch.zeros(tensor_size, dtype=torch.uint8)
+        sure_bg_full_mask = torch.zeros(tensor_size, dtype=torch.uint8)
+        for attention_map in attention_maps:
+            attention_map = attention_map[None, None, :, :].float()
+
+            breakpoint()
+            attention_map = F.interpolate(
+                attention_map, size=tensor_size, mode="bicubic"
+            )[0, 0]
+
+            threshold_sure_fg = sure_fg_threshold * attention_map.max()
+            threshold_maybe_bg = maybe_bg_threshold * attention_map.max()
+            sure_fg_full_mask += attention_map > threshold_sure_fg
+            unsure += (attention_map > maybe_bg_threshold) & (
+                attention_map <= threshold_sure_fg
+            )
+            sure_bg_full_mask += attention_map <= threshold_maybe_bg
+
+        mask = torch.zeros(tensor_size, dtype=torch.uint8)
+        mask = torch.where(sure_bg_full_mask, 255, mask)
+        mask = torch.where(unsure, 128, mask)
+        mask = torch.where(sure_fg_full_mask, 0, mask)
+
+        return mask
+
+    if isinstance(attention_maps, list):
+        masks = [
+            _compute_trimap(
+                attention_map, image_size, sure_fg_threshold, maybe_bg_threshold
+            )
+            for attention_map in attention_maps
+        ]
+        return torch.stack(masks)
+    else:
+        return _compute_trimap(
+            attention_maps, image_size, sure_fg_threshold, maybe_bg_threshold
+        )[None]
+
+
+def combine_to_rgba_image(
+    rgb_image: PilImage, alpha_image: Union[torch.Tensor, np.ndarray]
+) -> PilImage:
+    alpha_image *= 255
+    if isinstance(alpha_image, torch.Tensor):
+        alpha_image = alpha_image.detach().clone().cpu().numpy()
+        alpha_image = alpha_image.clip(0, 255).astype(np.uint8)
+
+    alpha_image_pl = Image.fromarray(alpha_image, mode="L")
+    rgb_image = rgb_image.copy()
+    rgb_image.putalpha(alpha_image_pl)
+    return rgb_image
+
+
+@dataclass
+class ParsedNounts(object):
+    nouns: List[str]
+    nouns_indexes: List[List[int]]
+    num_prompt_tokens: int
+
+
 class AlfiePixArtSigmaPipeline(PixArtSigmaPipeline):
     def __init__(
         self,
@@ -181,21 +336,28 @@ class AlfiePixArtSigmaPipeline(PixArtSigmaPipeline):
         scheduler_name: str,
         torch_dtype: torch.dtype,
         pipeline_id: str = "PixArt-alpha/PixArt-Sigma-XL-2-1024-MS",
+        denoiser_id: Optional[str] = None,
     ) -> "AlfiePixArtSigmaPipeline":
         download_nltk_data()
 
         if image_size == 256:
-            denoiser_id = "PixArt-alpha/PixArt-Sigma-XL-2-256x256"
+            _denoiser_id = "PixArt-alpha/PixArt-Sigma-XL-2-256x256"
         elif image_size == 512:
-            denoiser_id = "PixArt-alpha/PixArt-Sigma-XL-2-512-MS"
+            _denoiser_id = "PixArt-alpha/PixArt-Sigma-XL-2-512-MS"
         else:
             raise ValueError(f"Invalid image size: {image_size}")
+
+        if denoiser_id is not None and denoiser_id != _denoiser_id:
+            raise ValueError(
+                f"The image size (= {image_size}) and "
+                f"the specified model ID (= {denoiser_id}) are different."
+            )
 
         transformer = AlfinePixArtTransformer2DModel.from_pretrained(
             denoiser_id,
             subfolder="transformer",
             use_safetensors=True,
-            torch_dtype=torch.float16,
+            torch_dtype=torch_dtype,
         )
 
         dpm_scheduler = DPMSolverMultistepScheduler.from_pretrained(
@@ -213,7 +375,10 @@ class AlfiePixArtSigmaPipeline(PixArtSigmaPipeline):
             raise ValueError(f"Invalid scheduler: {scheduler_name}")
 
         return cls.from_pretrained(
-            pipeline_id, transformer=transformer, scheduler=eul_scheduler
+            pipeline_id,
+            transformer=transformer,
+            scheduler=eul_scheduler,
+            torch_dtype=torch_dtype,
         )
 
     def create_generation_mask(
@@ -421,7 +586,9 @@ class AlfiePixArtSigmaPipeline(PixArtSigmaPipeline):
             negative_prompt_attention_mask,
         )
 
-    def parse_nouns(self, prompt: str, nouns_to_exclude=None):
+    def parse_nouns(
+        self, prompt: str, nouns_to_exclude: Optional[Sequence[str]] = None
+    ) -> ParsedNounts:
         if nouns_to_exclude is None:
             nouns_to_exclude = []
         prompt = prompt.lower()
@@ -445,7 +612,109 @@ class AlfiePixArtSigmaPipeline(PixArtSigmaPipeline):
             for index in start_indexes:
                 merge_indexes += [i + index for i in range(0, len(search_tokens))]
             nouns_indexes.append(merge_indexes)
-        return nouns, nouns_indexes, num_prompt_tokens
+
+        return ParsedNounts(
+            nouns=nouns,
+            nouns_indexes=nouns_indexes,
+            num_prompt_tokens=num_prompt_tokens,
+        )
+
+    def _postprocess_gradcut(
+        self,
+        rgb_image: PilImage,
+        heatmaps: AlfieHeatmaps,
+        image_size: int,
+        sure_fg_threshold: float,
+        maybe_fg_threshold: float,
+        maybe_bg_threshold: float,
+        k_alpha_intensity: float,
+    ) -> PilImage:
+        alpha_mask = grabcut(
+            image=rgb_image,
+            attention_maps=list(heatmaps["cross_heatmaps_fg_nouns"].values()),
+            image_size=image_size,
+            sure_fg_threshold=sure_fg_threshold,
+            maybe_fg_threshold=maybe_fg_threshold,
+            maybe_bg_threshold=maybe_bg_threshold,
+        )
+
+        alpha_mask_alfie = torch.tensor(alpha_mask)
+        alfa_hat = normalize_masks(
+            heatmaps["ff_heatmap"] + 1 * heatmaps["cross_heatmap_fg"]
+        )
+
+        alfa_hat = (alfa_hat + k_alpha_intensity * alfa_hat).clip(0, 1)
+        alpha_mask_alfie = torch.where(alpha_mask_alfie == 1, alfa_hat, 0.0)
+
+        return combine_to_rgba_image(rgb_image=rgb_image, alpha_image=alpha_mask_alfie)
+
+    def _postprocess_vit_matte(
+        self,
+        rgb_image: PilImage,
+        heatmaps: AlfieHeatmaps,
+        image_size: int,
+        model_id: str,
+        sure_fg_threshold: float,
+        maybe_bg_threshold: float,
+    ) -> PilImage:
+        from transformers import VitMatteForImageMatting, VitMatteImageProcessor
+
+        vit_matte_processor = VitMatteImageProcessor.from_pretrained(model_id)
+        vit_matte_model = VitMatteForImageMatting.from_pretrained(model_id)
+        vit_matte_model = vit_matte_model.eval()
+
+        trimap = compute_trimap(
+            attention_maps=[list(heatmaps["cross_heatmaps_fg_nouns"].values())],
+            image_size=image_size,
+            sure_fg_threshold=sure_fg_threshold,
+            maybe_bg_threshold=maybe_bg_threshold,
+        )
+
+        vit_matte_inputs = vit_matte_processor(
+            images=rgb_image, trimaps=trimap, return_tensors="pt"
+        )
+        vit_matte_inputs = vit_matte_inputs.to(self.device)
+        vit_matte_model = vit_matte_model.to(self.device)
+
+        with torch.no_grad():
+            alpha_mask = vit_matte_model(**vit_matte_inputs).alphas[0, 0]
+        alpha_mask = 1 - alpha_mask.detach().clone().cpu().numpy()
+
+        return combine_to_rgba_image(rgb_image=rgb_image, alpha_image=alpha_mask)
+
+    def postprocess(
+        self,
+        rgb_image: PilImage,
+        heatmaps: AlfieHeatmaps,
+        cutout_model: CutoutModel,
+        image_size: int,
+        sure_fg_threshold: float,
+        maybe_fg_threshold: float,
+        maybe_bg_threshold: float,
+        k_alpha_intensity: float,
+        vit_matte_model_id: str = "hustvl/vitmatte-base-composition-1k",
+    ) -> PilImage:
+        if cutout_model == "grabcut":
+            return self._postprocess_gradcut(
+                rgb_image=rgb_image,
+                heatmaps=heatmaps,
+                image_size=image_size,
+                sure_fg_threshold=sure_fg_threshold,
+                maybe_fg_threshold=maybe_fg_threshold,
+                maybe_bg_threshold=maybe_bg_threshold,
+                k_alpha_intensity=k_alpha_intensity,
+            )
+        elif cutout_model == "vit-matte":
+            return self._postprocess_vit_matte(
+                rgb_image=rgb_image,
+                heatmaps=heatmaps,
+                image_size=image_size,
+                model_id=vit_matte_model_id,
+                sure_fg_threshold=sure_fg_threshold,
+                maybe_bg_threshold=maybe_bg_threshold,
+            )
+        else:
+            raise ValueError(f"Invalid cutout model: {cutout_model}")
 
     @torch.no_grad()
     def __call__(
@@ -478,7 +747,7 @@ class AlfiePixArtSigmaPipeline(PixArtSigmaPipeline):
         nouns_to_exclude: Sequence[str] = NOUNS_TO_EXCLUDE,
         disable_tqdm: bool = False,
         **kwargs,
-    ) -> Union[ImagePipelineOutput, Tuple]:
+    ) -> Union[AlfieImagePipelineOutput, Tuple]:
         """
         Function invoked when calling the pipeline for generation.
 
@@ -594,8 +863,7 @@ class AlfiePixArtSigmaPipeline(PixArtSigmaPipeline):
         else:
             batch_size = prompt_embeds.shape[0]
 
-        device = self._execution_device  # THIS AUTOMATICALLY CHANGES TO CPU
-        device = torch.device("cuda")
+        device = self._execution_device
 
         # here `guidance_scale` is defined analog to the guidance weight `w` of equation (2)
         # of the Imagen paper: https://arxiv.org/pdf/2205.11487.pdf . `guidance_scale = 1`
@@ -674,14 +942,11 @@ class AlfiePixArtSigmaPipeline(PixArtSigmaPipeline):
             tokenizer=self.tokenizer,
         )
         self.transformer.set_attn_processor(processor)
-        nouns, nouns_indexes, num_prompt_tokens = self.parse_nouns(
-            prompt_clean, nouns_to_exclude=nouns_to_exclude
-        )
-        if len(nouns_indexes) == 0:
-            logger.warning(
+        parsed_nouns = self.parse_nouns(prompt_clean, nouns_to_exclude=nouns_to_exclude)
+        if len(parsed_nouns.nouns_indexes) == 0:
+            raise ValueError(
                 f"No nouns found in the prompt {prompt_clean}. Returning None and skipping the generation."
             )
-            return None, None, None
 
         self.text_encoder = self.text_encoder.to("cpu")
         # 7. Denoising loop
@@ -691,7 +956,7 @@ class AlfiePixArtSigmaPipeline(PixArtSigmaPipeline):
 
         self.set_progress_bar_config(disable=disable_tqdm)
         with self.progress_bar(total=num_inference_steps) as progress_bar:
-            processor.num_prompt_tokens = num_prompt_tokens
+            processor.num_prompt_tokens = parsed_nouns.num_prompt_tokens
             for i, t in enumerate(timesteps):
                 processor.t = t
                 processor.l_iteration_ca = 0
@@ -740,7 +1005,7 @@ class AlfiePixArtSigmaPipeline(PixArtSigmaPipeline):
                         encoder_attention_mask=prompt_attention_mask,
                         timestep=current_timestep,
                         added_cond_kwargs=added_cond_kwargs,
-                        return_dict=False,
+                        return_dict=return_dict,
                     )[0]
 
                     # perform guidance
@@ -808,7 +1073,7 @@ class AlfiePixArtSigmaPipeline(PixArtSigmaPipeline):
         self_heatmap_fg = processor.compute_global_self_heat_map()
         cross_heatmap_fg = processor.compute_global_cross_heat_map(prompt=prompt_clean)
         cross_heatmaps_fg = []
-        for noun in nouns:
+        for noun in parsed_nouns.nouns:
             cross_heatmap_noun = cross_heatmap_fg.compute_word_heat_map(noun)
             self_heatmap_noun = self_heatmap_fg.compute_guided_heat_map(
                 normalize_masks(cross_heatmap_noun.heatmap)
@@ -840,4 +1105,4 @@ class AlfiePixArtSigmaPipeline(PixArtSigmaPipeline):
         if not return_dict:
             return image, heatmaps
 
-        return ImagePipelineOutput(images=image)
+        return AlfieImagePipelineOutput(images=image, heatmaps=heatmaps)

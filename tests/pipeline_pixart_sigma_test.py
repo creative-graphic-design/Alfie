@@ -2,8 +2,10 @@ from typing import List
 
 import pytest
 import torch
+from PIL.Image import Image as PilImage
 
 from alfie.pipelines import AlfiePixArtSigmaPipeline
+from alfie.pipelines.pixart_alpha import CutoutModel
 
 
 @pytest.fixture
@@ -13,7 +15,7 @@ def device() -> torch.device:
 
 @pytest.fixture
 def torch_dtype() -> torch.dtype:
-    return torch.bfloat16
+    return torch.float16
 
 
 @pytest.fixture
@@ -62,7 +64,7 @@ def seed() -> int:
 
 
 @pytest.fixture
-def vit_matte_key() -> str:
+def vit_matte_model_id() -> str:
     return "hustvl/vitmatte-base-composition-1k"
 
 
@@ -79,7 +81,7 @@ def pipeline_id() -> str:
     ),
 )
 @pytest.mark.parametrize(
-    argnames="image_size, model_id",
+    argnames="image_size, denoiser_id",
     argvalues=(
         (256, "PixArt-alpha/PixArt-Sigma-XL-2-256x256"),
         (512, "PixArt-alpha/PixArt-Sigma-XL-2-512-MS"),
@@ -87,15 +89,28 @@ def pipeline_id() -> str:
 )
 @pytest.mark.parametrize(
     argnames="scheduler_name",
-    argvalues=("euler", "euler_ancestral"),
+    argvalues=(
+        "euler",
+        "euler_ancestral",
+    ),
 )
 @pytest.mark.parametrize(
     argnames="cutout_model",
-    argvalues=("grabcut", "vit-matte"),
+    argvalues=(
+        "grabcut",
+        "vit-matte",
+    ),
 )
+# @pytest.mark.parametrize(
+#     argnames="suffix",
+#     argvalues=("", " on a white background"),
+# )
 @pytest.mark.parametrize(
-    argnames="suffix",
-    argvalues=("", " on a white background"),
+    argnames="return_dict",
+    argvalues=(
+        True,
+        False,
+    ),
 )
 def test_pipeline_pixart_sigma(
     fg_prompt: str,
@@ -105,24 +120,56 @@ def test_pipeline_pixart_sigma(
     negative_prompts: List[str],
     image_size: int,
     steps: int,
-    cutout_model: str,
+    cutout_model: CutoutModel,
     sure_fg_threshold: float,
     maybe_fg_threshold: float,
     maybe_bg_threshold: float,
     num_images: int,
-    suffix: str,
+    # suffix: str,
     seed: int,
-    vit_matte_key: str,
+    vit_matte_model_id: str,
     pipeline_id: str,
-    model_id: str,
+    denoiser_id: str,
     device: torch.device,
     torch_dtype: torch.dtype,
+    return_dict: bool,
 ):
     pipe = AlfiePixArtSigmaPipeline.from_alfie_setting(
-        image_size=image_size, scheduler_name=scheduler_name, torch_dtype=torch_dtype
+        image_size=image_size,
+        scheduler_name=scheduler_name,
+        pipeline_id=pipeline_id,
+        denoiser_id=denoiser_id,
+        torch_dtype=torch_dtype,
     )
     pipe = pipe.to(device)
+
     prompt_complete = ["A white background", fg_prompt]
-    prompt_full = " ".join(prompt_complete[1].split())
     prompt = prompt_complete if not disable_centering else prompt_complete[1]
-    prompt += suffix
+
+    output = pipe(
+        prompt=prompt,
+        nevative_prompt=negative_prompts,
+        keep_cross_attention_maps=True,
+        return_dict=return_dict,
+        num_inference_steps=steps,
+        centering=not disable_centering,
+        generator=torch.Generator(device).manual_seed(seed),
+    )
+    images = output.images if return_dict else output[0]
+    heatmaps = output.heatmaps if return_dict else output[1]
+
+    assert len(images) == 1
+    rgb_image = images[0]
+
+    rgba_image = pipe.postprocess(
+        rgb_image=rgb_image,
+        heatmaps=heatmaps,
+        cutout_model=cutout_model,
+        image_size=image_size,
+        sure_fg_threshold=sure_fg_threshold,
+        maybe_fg_threshold=maybe_fg_threshold,
+        maybe_bg_threshold=maybe_bg_threshold,
+        k_alpha_intensity=k_alpha_intensity,
+        vit_matte_model_id=vit_matte_model_id,
+    )
+    assert isinstance(rgba_image, PilImage)
